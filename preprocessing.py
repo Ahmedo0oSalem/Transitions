@@ -9,6 +9,11 @@ import bz2
 RAW_TRACKING_DIR = "Tracking_Data"
 RAW_METADATA_DIR = "Metadata"
 
+# ASSUMPTION: roster files live in a folder parallel to Metadata/Tracking_Data,
+# named the same way (<match_id>.json). Rename this if yours differs
+# (e.g. "Rosters", "Lineups", "Squads").
+RAW_ROSTERS_DIR = "Rosters"
+
 OUTPUT_DIR = "Processed_Tracking"
 
 # Which tracking fields to keep
@@ -33,6 +38,102 @@ METADATA_FIELDS = [
     "homeTeamStartLeft",
     "stadium",
 ]
+
+
+# ==========================
+# Roster
+# ==========================
+
+def process_roster(match_id, home_team_id, away_team_id):
+    """
+    Reads Rosters/<match_id>.json (a flat list of
+    {"player": {"id", "nickname"}, "positionGroupType", "shirtNumber",
+     "started", "team": {"id", "name"}} entries -- one row per squad
+    player, both teams mixed together) and returns:
+
+        {
+            "players": [
+                {"playerId": str, "name": str, "position": str,
+                 "shirtNumber": str, "started": bool, "side": "home"/"away"},
+                ...
+            ],
+            "goalkeepers": {
+                "home": {"playerId": str, "shirtNumber": str} or None,
+                "away": {"playerId": str, "shirtNumber": str} or None,
+            }
+        }
+
+    or None if the roster file is missing.
+
+    We store BOTH playerId and shirtNumber for each goalkeeper because
+    we don't know, without inspecting a raw tracking frame, whether your
+    tracking provider identifies players in homePlayers/awayPlayers by
+    an internal player ID or by shirt number (detect_formation.py's
+    PLAYER_ID_KEYS tries several). Keeping both lets the formation
+    script match on whichever key the tracking data actually uses.
+    """
+    input_path = os.path.join(RAW_ROSTERS_DIR, f"{match_id}.json")
+
+    if not os.path.exists(input_path):
+        print(f"    !! Roster missing: {match_id} (looked in {input_path}). "
+              f"Formation detection will fall back to distance-based GK guessing.")
+        return None
+
+    with open(input_path, "r", encoding="utf-8") as f:
+        roster = json.load(f)
+
+    if isinstance(roster, dict):
+        # in case some files wrap the list, same pattern as metadata
+        roster = roster.get("players", roster.get("data", [roster]))
+
+    home_team_id = str(home_team_id)
+    away_team_id = str(away_team_id)
+
+    players = []
+    goalkeepers = {"home": None, "away": None}
+    unmatched_team_ids = set()
+
+    for entry in roster:
+        player = entry.get("player", {})
+        team = entry.get("team", {})
+        team_id = str(team.get("id"))
+
+        if team_id == home_team_id:
+            side = "home"
+        elif team_id == away_team_id:
+            side = "away"
+        else:
+            unmatched_team_ids.add(team_id)
+            continue
+
+        record = {
+            "playerId": str(player.get("id")),
+            "name": player.get("nickname"),
+            "position": entry.get("positionGroupType"),
+            "shirtNumber": str(entry.get("shirtNumber")),
+            "started": bool(entry.get("started", False)),
+            "side": side,
+        }
+        players.append(record)
+
+        if record["started"] and record["position"] == "GK":
+            goalkeepers[side] = {
+                "playerId": record["playerId"],
+                "shirtNumber": record["shirtNumber"],
+            }
+
+    if unmatched_team_ids:
+        print(f"    !! WARNING: roster for {match_id} has team id(s) "
+              f"{unmatched_team_ids} that don't match homeTeam id "
+              f"({home_team_id}) or awayTeam id ({away_team_id}) from metadata. "
+              f"Check the id field name/type in your raw metadata/roster.")
+
+    for side in ("home", "away"):
+        if goalkeepers[side] is None:
+            print(f"    !! WARNING: no starting GK found in roster for "
+                  f"{match_id} / {side} team.")
+
+    return {"players": players, "goalkeepers": goalkeepers}
 
 
 # ==========================
@@ -95,6 +196,22 @@ def process_metadata(match_id):
         "periods": periods
     }
 
+    # --------------------------------------------------
+    # Roster: attach goalkeeper IDs (and write the full roster
+    # separately) so formation detection doesn't have to guess the GK
+    # from movement.
+    # --------------------------------------------------
+    roster_data = process_roster(
+        match_id,
+        home_team_id=metadata["homeTeam"]["id"],
+        away_team_id=metadata["awayTeam"]["id"],
+    )
+
+    if roster_data is not None:
+        output["goalkeepers"] = roster_data["goalkeepers"]
+    else:
+        output["goalkeepers"] = {"home": None, "away": None}
+
     output_folder = os.path.join(OUTPUT_DIR, str(match_id))
     os.makedirs(output_folder, exist_ok=True)
 
@@ -102,6 +219,11 @@ def process_metadata(match_id):
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=4)
+
+    if roster_data is not None:
+        roster_path = os.path.join(output_folder, "roster.json")
+        with open(roster_path, "w", encoding="utf-8") as f:
+            json.dump(roster_data["players"], f, indent=4)
 
 
 # ==========================

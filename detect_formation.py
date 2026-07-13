@@ -10,18 +10,27 @@ which does the same thing with mplsoccer's templates):
   1. For each window, compute each outfield player's AVERAGE (x, y)
      position over all frames in that window (this smooths out
      instantaneous movement/noise and reveals the underlying shape).
-  2. Exclude the goalkeeper (identified once per match via total distance
-     covered -- GKs move far less than outfield players).
+  2. Exclude the goalkeeper. The GK for each side is read directly from
+     metadata.json (populated by preprocessing.py from the match roster:
+     the starting player with positionGroupType == "GK"). If a match has
+     no roster-derived GK (missing roster file), we fall back to the old
+     heuristic: identify via total distance covered per frame -- GKs move
+     far less than outfield players.
   3. For every candidate formation template (mplsoccer has 65 "full" 11-man
      templates: 442, 433, 4231, 352, ...), solve the assignment problem
      (Hungarian algorithm) between the 10 average outfield positions and
      the 10 template positions, minimizing total squared distance.
   4. The template with the lowest total cost is the detected formation
      for that team in that window.
-  5. Because a team can be attacking left->right or right->left (this
-     flips every period, and can vary frame to frame if you don't trust
-     metadata), both the normal and mirrored (x_flip/y_flip) versions of
-     each template are tried and the cheaper one is kept.
+  5. A team can be attacking left->right or right->left, and this flips
+     every period (teams swap ends at half-time, and again each extra-time
+     half). Rather than trying both orientations of every template and
+     keeping whichever is cheaper, we compute the correct orientation
+     directly from metadata's "homeTeamStartLeft" + the period number, and
+     only match against that one orientation. This is faster and removes
+     the (small) risk of a "mirrored" formation winning by fluke.
+     !!! VERIFY get_orientation()'s assumption against a known frame/video
+     before trusting this for a full run -- see the comment above it. !!!
 
 REQUIRES:
     pip install mplsoccer scipy numpy pandas --break-system-packages
@@ -31,9 +40,11 @@ INPUT:
     match_id:
         Processed_Tracking/<match_id>/metadata.json
         Processed_Tracking/<match_id>/tracking.jsonl.bz2
+        Processed_Tracking/<match_id>/roster.json   (optional but recommended)
 
     metadata.json must contain (as produced by your script):
-        "fps", "pitch": {"length": ..., "width": ...}, "periods": {...}
+        "fps", "pitch": {"length": ..., "width": ...}, "periods": {...},
+        "homeTeamStartLeft", "goalkeepers": {"home": {...}, "away": {...}}
 
     Each line of tracking.jsonl.bz2 must contain:
         "period", "periodElapsedTime", "homePlayers", "awayPlayers", "balls"
@@ -155,38 +166,70 @@ def build_templates(pitch_length, pitch_width):
     return templates
 
 
-def match_formation(player_xy, templates):
+def match_formation(player_xy, templates, orientation):
     """
     Given (N, 2) average outfield player positions (N==10 ideally, but
     works down to MIN_OUTFIELD_PLAYERS by matching a subset of template
-    positions), find the best-fitting formation.
+    positions), find the best-fitting formation, using only the given
+    orientation ("normal" or "flipped") of each template -- the caller
+    (process_match, via get_orientation) has already worked out which
+    orientation matches this team's actual attacking direction for this
+    period, so we don't need to try both and pick the cheaper one.
 
     Returns: (best_formation_name, best_cost, best_assignment_names)
     """
-    n_players = player_xy.shape[0]
     best_formation, best_cost, best_names = None, np.inf, None
 
     for formation, tmpl in templates.items():
-        for orientation in ("normal", "flipped"):
-            template_xy = tmpl[orientation]
-            # linear_sum_assignment handles rectangular cost matrices fine
-            # (it matches min(n_players, n_template_slots) pairs), so this
-            # works whether a window has fewer players than the template
-            # (missing/subbed player) or more (tracking noise/ghost
-            # detections -- e.g. a staff member briefly picked up).
-            cost_matrix = cdist(player_xy, template_xy)
-            row_ind, col_ind = linear_sum_assignment(cost_matrix)
-            cost = cost_matrix[row_ind, col_ind].sum()
-            # Normalize by number of matched pairs so formations aren't
-            # unfairly penalized/favored by player count.
-            norm_cost = cost / len(row_ind)
+        template_xy = tmpl[orientation]
+        # linear_sum_assignment handles rectangular cost matrices fine
+        # (it matches min(n_players, n_template_slots) pairs), so this
+        # works whether a window has fewer players than the template
+        # (missing/subbed player) or more (tracking noise/ghost
+        # detections -- e.g. a staff member briefly picked up).
+        cost_matrix = cdist(player_xy, template_xy)
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        cost = cost_matrix[row_ind, col_ind].sum()
+        # Normalize by number of matched pairs so formations aren't
+        # unfairly penalized/favored by player count.
+        norm_cost = cost / len(row_ind)
 
-            if norm_cost < best_cost:
-                best_cost = norm_cost
-                best_formation = formation
-                best_names = [tmpl["names"][i] for i in col_ind]
+        if norm_cost < best_cost:
+            best_cost = norm_cost
+            best_formation = formation
+            best_names = [tmpl["names"][i] for i in col_ind]
 
     return best_formation, best_cost, best_names
+
+
+def get_orientation(team_key, period, home_team_start_left):
+    """
+    Returns "normal" or "flipped" -- which orientation of the formation
+    templates matches this team's actual attacking direction in this
+    period, given by metadata's "homeTeamStartLeft".
+
+    ASSUMPTION (verify before trusting a full run!): "normal" template
+    coordinates represent a team attacking left->right (increasing x,
+    toward the corner-origin pitch's right edge), matching mplsoccer's
+    convention. "homeTeamStartLeft" == True means the home team starts
+    period 1 defending the left side / attacking left->right.
+
+    To verify: pick one match, one frame near kickoff, average the home
+    team's raw x (after the COORDS_ARE_CENTERED shift) -- it should sit
+    in the defensive (low-x) half if homeTeamStartLeft is True. If it's
+    backwards for your data, just swap "normal" <-> "flipped" below.
+
+    Teams swap ends every period (half-time, and each extra-time half),
+    so periods 1 and 3 share home's period-1 direction; periods 2 and 4
+    are the reverse.
+    """
+    home_attacks_left_to_right = (
+        home_team_start_left if period % 2 == 1 else not home_team_start_left
+    )
+    if team_key == "homePlayers":
+        return "normal" if home_attacks_left_to_right else "flipped"
+    else:
+        return "flipped" if home_attacks_left_to_right else "normal"
 
 
 # ==========================
@@ -217,11 +260,41 @@ def extract_player_xy(player_dict):
 # Goalkeeper identification
 # ==========================
 
+def goalkeepers_from_metadata(metadata):
+    """
+    Preferred path: read goalkeeper identity straight from the roster
+    (via preprocessing.py, which wrote metadata["goalkeepers"] = {"home":
+    {"playerId", "shirtNumber"}, "away": {...}}). No estimation needed.
+
+    Because we don't know in advance whether your tracking provider's
+    homePlayers/awayPlayers entries key each player by an internal ID or
+    by shirt number, we return a SET of acceptable identifiers per team
+    (playerId AND shirtNumber, as strings) -- accumulate_positions checks
+    a tracked pid against this set, so it matches whichever key
+    PLAYER_ID_KEYS actually picked up from the raw frame.
+
+    Returns: {"homePlayers": set[str] | None, "awayPlayers": set[str] | None}
+    (None for a side means: no roster GK available for that side.)
+    """
+    gk_meta = metadata.get("goalkeepers", {}) or {}
+    result = {}
+    for team_key, side in (("homePlayers", "home"), ("awayPlayers", "away")):
+        entry = gk_meta.get(side)
+        if not entry:
+            result[team_key] = None
+            continue
+        ids = {str(v) for v in entry.values() if v is not None}
+        result[team_key] = ids if ids else None
+    return result
+
+
 def identify_goalkeepers(tracking_path, team_keys=("homePlayers", "awayPlayers")):
     """
-    Walks the whole tracking file once and finds, for each team, the
-    player with the smallest AVERAGE per-frame displacement (a speed
-    proxy), among players tracked for at least GK_MIN_FRAMES points.
+    FALLBACK ONLY -- used when the roster wasn't available at
+    preprocessing time (see goalkeepers_from_metadata). Walks the whole
+    tracking file once and finds, for each team, the player with the
+    smallest AVERAGE per-frame displacement (a speed proxy), among
+    players tracked for at least GK_MIN_FRAMES points.
 
     We normalize by frame count rather than using raw total distance
     covered, because a substitute who only played a few minutes would
@@ -230,7 +303,8 @@ def identify_goalkeepers(tracking_path, team_keys=("homePlayers", "awayPlayers")
     reliably have the lowest average per-frame movement of anyone who
     played meaningful minutes, regardless of how long they were on.
 
-    Returns: {team_key: goalkeeper_player_id}
+    Returns: {team_key: {goalkeeper_player_id} } -- a single-element set,
+    for a uniform interface with goalkeepers_from_metadata.
     """
     last_xy = {team: {} for team in team_keys}
     total_dist = {team: defaultdict(float) for team in team_keys}
@@ -277,8 +351,31 @@ def identify_goalkeepers(tracking_path, team_keys=("homePlayers", "awayPlayers")
             else:
                 goalkeepers[team] = None
                 continue
-        goalkeepers[team] = min(candidates, key=candidates.get)
+        goalkeepers[team] = {str(min(candidates, key=candidates.get))}
     return goalkeepers
+
+
+def resolve_goalkeepers(tracking_path, metadata):
+    """
+    Tries the roster first (fast, exact); falls back to the distance
+    heuristic per-team for any side the roster didn't cover.
+
+    Returns: {"homePlayers": set[str] | None, "awayPlayers": set[str] | None}
+    """
+    from_roster = goalkeepers_from_metadata(metadata)
+    missing = [team for team, ids in from_roster.items() if ids is None]
+
+    if not missing:
+        return from_roster
+
+    print(f"    goalkeeper(s) missing from roster for: {missing} "
+          f"-- falling back to distance-based estimation for those.")
+    from_distance = identify_goalkeepers(tracking_path, team_keys=tuple(missing))
+
+    resolved = dict(from_roster)
+    for team in missing:
+        resolved[team] = from_distance.get(team)
+    return resolved
 
 
 # ==========================
@@ -327,13 +424,13 @@ def accumulate_positions(tracking_path, goalkeepers, pitch_length, pitch_width,
                 window_indices = list(get_window_indices(elapsed))
 
                 for team in team_keys:
-                    gk_id = goalkeepers.get(team)
+                    gk_ids = goalkeepers.get(team) or set()
                     for p in frame.get(team, []):
                         parsed = extract_player_xy(p)
                         if parsed is None:
                             continue
                         pid, x, y = parsed
-                        if pid == gk_id:
+                        if str(pid) in gk_ids:
                             continue  # exclude goalkeeper
                         xy = (x + x_shift, y + y_shift)
                         for k in window_indices:
@@ -364,12 +461,13 @@ def process_match(match_id, processed_dir=PROCESSED_DIR):
 
     pitch_length = metadata["pitch"]["length"]
     pitch_width = metadata["pitch"]["width"]
+    home_team_start_left = metadata["homeTeamStartLeft"]
 
     print(f"[{match_id}] building formation templates ({pitch_length}x{pitch_width})...")
     templates = build_templates(pitch_length, pitch_width)
 
-    print(f"[{match_id}] identifying goalkeepers...")
-    goalkeepers = identify_goalkeepers(tracking_path)
+    print(f"[{match_id}] resolving goalkeepers...")
+    goalkeepers = resolve_goalkeepers(tracking_path, metadata)
     print(f"[{match_id}] goalkeepers: {goalkeepers}")
 
     print(f"[{match_id}] accumulating positions into {WINDOW_SECONDS}s windows "
@@ -392,7 +490,8 @@ def process_match(match_id, processed_dir=PROCESSED_DIR):
         if avg_xy.shape[0] < MIN_OUTFIELD_PLAYERS:
             continue
 
-        formation, cost, _assigned_names = match_formation(avg_xy, templates)
+        orientation = get_orientation(team, period, home_team_start_left)
+        formation, cost, _assigned_names = match_formation(avg_xy, templates, orientation)
 
         window_start = window_index * STRIDE_SECONDS
         window_end = window_start + WINDOW_SECONDS
@@ -407,6 +506,7 @@ def process_match(match_id, processed_dir=PROCESSED_DIR):
             "nOutfieldPlayers": avg_xy.shape[0],
             "nFrames": n_frames,
             "formation": formation,
+            "orientation": orientation,
             "avgCostPerPlayer": round(float(cost), 3),
         })
 

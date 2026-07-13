@@ -26,6 +26,7 @@ names, coordinate handling, and who the goalkeepers are.
 """
 
 import os
+import sys
 import bz2
 import json
 import argparse
@@ -33,15 +34,13 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib
-# Try backends in order of preference. MacOSX is native on Mac (no Tk
-# dependency headaches); TkAgg is the cross-platform fallback. If neither
-# is available, matplotlib falls back to whatever default it can find.
-for _backend in ("MacOSX", "TkAgg"):
-    try:
-        matplotlib.use(_backend)
-        break
-    except Exception:
-        continue
+# matplotlib.use(backend) only RECORDS the preference -- it doesn't import
+# the backend module until the first plt.subplots()/pitch.draw() call. So
+# wrapping it in try/except doesn't actually catch an unavailable backend;
+# it always "succeeds" immediately and the real failure shows up later,
+# deep in a draw() call, which is confusing. Pick by platform instead:
+# MacOSX backend only exists (and is only worth using) on macOS.
+matplotlib.use("MacOSX" if sys.platform == "darwin" else "TkAgg")
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
 from mplsoccer import Pitch
@@ -180,8 +179,15 @@ def load_match(match_id, processed_dir):
                 if bx is not None and by is not None:
                     ball_xy[i] = (bx + x_shift, by + y_shift)
 
-    print("Identifying goalkeepers...")
-    goalkeepers = df_mod.identify_goalkeepers(tracking_path)
+    print("Resolving goalkeepers (roster first, distance-based fallback)...")
+    # resolve_goalkeepers checks metadata["goalkeepers"] (from the roster,
+    # via preprocessing.py) first, and only falls back to distance-based
+    # identify_goalkeepers per side if the roster didn't cover it -- same
+    # logic path detect_formations.py now uses, so the two tools still
+    # always agree on who the goalkeepers are. Each team maps to a small
+    # set of acceptable IDs (playerId and/or shirtNumber), not a single
+    # scalar, since we don't assume which key your tracking data uses.
+    goalkeepers = df_mod.resolve_goalkeepers(tracking_path, metadata)
 
     formations_df = None
     if os.path.exists(formations_path):
