@@ -6,14 +6,35 @@ used by both plot_formation_timeline.py (defines "one bar per possession
 sequence") and epv_das_analysis.py (EPV over time + Dangerous Attacking
 Sequences).
 
-IMPORTANT CAVEAT: your tracking data has no real possession/event log.
-"Possession" here means "closest player to the ball, majority-vote
-smoothed to suppress frame-level flicker" -- a reasonable proxy, not
-ground truth. Treat every downstream output (possession sequences, DAS,
-EPV attribution) as an approximation, especially around contested/loose
-balls, blocked shots, deflections, etc.
+TWO POSSESSION SOURCES, in order of preference:
+  1. REAL events, from Processed_Tracking/<match_id>/events.json (written
+     by preprocessing.py's process_events(), sourced from the dedicated
+     Event_Data/<match_id>.json files -- the PFF FC Event Data
+     Specification v2.5 format, game events + possession events
+     pre-merged by the provider, one row per possession event). This is
+     an actual provider-labeled possession log -- ground truth, not a
+     proxy. Use load_events() + possession_sequences_from_events().
+     (Falls back to scraping game_event/possession_event straight off
+     the tracking frames only for matches with no Event_Data file --
+     see preprocessing.py's process_tracking docstring.)
+  2. FALLBACK proximity proxy: "closest player to the ball, majority-
+     vote smoothed to suppress frame-level flicker" -- used only when
+     events.json doesn't exist for a match (older data, or a provider
+     without event data). Treat this path's output (possession
+     sequences, DAS, EPV attribution) as an approximation, especially
+     around contested/loose balls, blocked shots, deflections, etc.
 
-Requires detect_formations.py in the same folder (reused for field-name
+  ASSUMPTION (flagging since I've only seen one example event): I don't
+  know whether the event taxonomy has continuous coverage of the whole
+  match (e.g. a "carry"/"open play" event filling every gap between
+  passes/shots) or only tags discrete actions, leaving silent gaps in
+  between. Because of that uncertainty, event-derived possession
+  sequences are used for DAS (discrete danger moments -- exactly what
+  events are good at), but the continuous EPV(t) momentum signal still
+  uses the proximity proxy (source 2), which has no gaps by
+  construction. Revisit this once you've confirmed the taxonomy.
+
+Requires detect_formation.py in the same folder (reused for field-name
 aliasing so this always agrees with the rest of the pipeline).
 """
 
@@ -288,6 +309,132 @@ def detect_possession_sequences(owner_smoothed, periods, elapsed, fps,
                 coalesced.append(dict(seg))
 
         sequences.extend(coalesced)
+
+    return sequences
+
+
+# ==========================
+# Real events (preferred possession source -- see module docstring)
+# ==========================
+
+def load_events(match_dir):
+    """
+    Loads events.json (written by preprocessing.py) if present. Returns
+    None if this match has no event data -- callers should fall back to
+    the proximity proxy in that case, not crash.
+    """
+    path = os.path.join(match_dir, "events.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def possession_sequences_from_events(events, home_team_id):
+    """
+    Builds possession sequences directly from real event data, in the
+    same {team, period, start_sec, end_sec, duration} shape that
+    detect_possession_sequences() produces from the proximity proxy --
+    so callers (evaluate_das, plot_formation_timeline's possession-bar
+    mode) can use either source interchangeably.
+
+    events.json (written by preprocessing.py's process_events) is now
+    sourced from the PFF FC Event Data spec: one row per POSSESSION
+    EVENT, not deduped by gameEventId, so a "challenge then pass" game
+    event correctly shows up as two rows here. Two filters are applied
+    before building sequences, both necessary for this source (neither
+    applied automatically upstream):
+
+      1. gameEventType == "OTB" only. Non-OTB game events (SUB, OFF,
+         ON, OUT, END, kickoffs, FOUL, VID, G) also carry a teamId in
+         this data and would otherwise get misread as that team having
+         the ball -- e.g. a substitution would show up as a possession
+         sequence. Only "a possession with a player on the ball" (the
+         spec's own definition of OTB) should count.
+      2. nonEvent == False. Possessions the provider flagged as
+         disallowed after the fact (e.g. a shot later ruled offside)
+         are excluded from the sequence timeline.
+
+    GROUPING: rows are grouped by (period, sequence) rather than by
+    re-derived time-adjacency. The spec defines "sequence" as "an
+    uninterrupted possession by one team" -- i.e. the provider has
+    already done exactly the segmentation this function used to
+    reconstruct heuristically (walk sorted events, coalesce consecutive
+    same-team rows). Trusting the provider's own field is more robust
+    than re-deriving it -- confirmed against a real challenge-then-pass
+    example where both rows shared sequence 2.0, teamId 51, but had
+    different possessionEventIds (CH then PA).
+
+    Within a group, start_sec is the min periodElapsedTimeEstimate and
+    end_sec is the max (periodElapsedTimeEstimate + duration) across
+    that group's rows -- necessary because startTime/duration are set
+    at the GAME EVENT level and repeat identically across every
+    possession event belonging to it, but a sequence can span multiple
+    game events (e.g. a carry's game event, then a separate pass's game
+    event, both part of the same uninterrupted possession), so taking
+    the min/max across the whole group is what actually captures the
+    full sequence span rather than just one game event's span.
+
+    If a (period, sequence) group's rows disagree on teamId (shouldn't
+    happen given the spec's definition of sequence, but not verified
+    across a full match), the majority team is used and a warning is
+    printed -- better than silently picking whichever row happened to
+    be seen first.
+
+    ASSUMPTION: each event's "teamId" reliably identifies who had the
+    ball; "periodElapsedTimeEstimate" (added by preprocessing.py from
+    the video-referenced startTime) is used as the time axis. Rows
+    without a resolvable team, period, sequence, or time estimate are
+    skipped.
+
+    Unlike the proximity proxy, this does NOT fill silent gaps between
+    sequences (see module docstring's taxonomy-coverage caveat) -- a
+    gap with no covering sequence is simply not represented, rather
+    than guessed at.
+    """
+    home_team_id = str(home_team_id)
+
+    otb_events = [ev for ev in events
+                  if ev.get("gameEventType") == "OTB" and not ev.get("nonEvent")]
+
+    groups = {}
+    for ev in otb_events:
+        period = ev.get("period")
+        seq = ev.get("sequence")
+        team_id = ev.get("teamId")
+        start = ev.get("periodElapsedTimeEstimate")
+        if period is None or seq is None or team_id is None or start is None:
+            continue
+        groups.setdefault((period, seq), []).append(ev)
+
+    sequences = []
+    for (period, seq), evs in sorted(groups.items(),
+                                      key=lambda kv: (kv[0][0], kv[0][1])):
+        team_counts = {}
+        for e in evs:
+            t = str(e.get("teamId"))
+            team_counts[t] = team_counts.get(t, 0) + 1
+        if len(team_counts) > 1:
+            print(f"    !! WARNING: sequence {seq} (period {period}) has "
+                  f"rows from multiple teamIds {list(team_counts)} -- "
+                  f"using the majority team. Check possessionEventType "
+                  f"'IT' rows or a sequence-numbering edge case.")
+        majority_team_id = max(team_counts, key=team_counts.get)
+
+        starts = [e["periodElapsedTimeEstimate"] for e in evs]
+        ends = [e["periodElapsedTimeEstimate"] + (e.get("duration") or 0.0) for e in evs]
+        start_sec = min(starts)
+        end_sec = max(ends)
+
+        sequences.append({
+            "team": "home" if majority_team_id == home_team_id else "away",
+            "period": period,
+            "start_sec": start_sec,
+            "end_sec": end_sec,
+        })
+
+    for s in sequences:
+        s["duration"] = s["end_sec"] - s["start_sec"]
 
     return sequences
 

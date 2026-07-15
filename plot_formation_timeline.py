@@ -17,6 +17,14 @@ previous raw/overlapping view, at the cost of depending on the
 possession heuristic (see possession.py's caveat: no real possession
 events exist in this data, so treat sequence boundaries as approximate).
 
+ALSO: goal markers, if Processed_Tracking/<match_id>/events.json exists
+(written by preprocessing.py's process_events() from Event_Data/, see
+find_goals()'s docstring). A gold vertical line marks the moment on both
+panels; a "MM' Scorer" label (with "(OG)" for own goals) is placed on
+the SCORING team's panel. Silently skipped -- with a printed note, not
+an error -- for matches with no events.json, since goal detection needs
+real event data (shotOutcomeType), not the tracking-only proxy.
+
 USAGE:
     python plot_formation_timeline.py <match_id> [--processed-dir DIR]
 
@@ -25,6 +33,8 @@ REQUIRES:
     Processed_Tracking/<match_id>/metadata.json
     Processed_Tracking/<match_id>/tracking.jsonl.bz2   (possession sequences are
                                                          derived directly from this)
+    Processed_Tracking/<match_id>/events.json          (optional -- enables goal
+                                                         markers if present)
     possession.py and detect_formations.py in the same folder as this script.
 """
 
@@ -85,7 +95,7 @@ def load_data(match_id, processed_dir):
     away_name = (metadata.get("awayTeam", {}).get("shortName")
                  or metadata.get("awayTeam", {}).get("name", "Away"))
 
-    return formations_df, metadata, home_name, away_name, tracking_path
+    return formations_df, metadata, home_name, away_name, tracking_path, folder
 
 
 def build_possession_sequences(tracking_path, metadata):
@@ -102,6 +112,77 @@ def build_possession_sequences(tracking_path, metadata):
           f"({sum(1 for s in sequences if s['team'])} with a clear team, "
           f"{sum(1 for s in sequences if not s['team'])} loose-ball/no-owner)")
     return sequences
+
+
+# Outcome fields that mark a possession event as an inadvertent shot into
+# the ACTING player's own net -- per the PFF FC spec, a deliberate shot
+# ("SH") is never an own goal (that scenario doesn't exist in the
+# taxonomy), only a clearance/touch/rebound that inadvertently beats the
+# keeper. Mapping: possessionEventType -> the outcome field that carries
+# the "D - Inadvertent Shot at own Goal" value for that type.
+_OWN_GOAL_OUTCOME_FIELD = {
+    "CL": "clearanceOutcomeType",
+    "TC": "touchOutcomeType",
+    "RE": "reboundOutcomeType",
+}
+
+
+def find_goals(events):
+    """
+    Scans events.json for goals. A goal is any possession event whose
+    shotOutcomeType == "G" -- per the spec, this field is populated
+    both for deliberate shots (possessionEventType "SH") AND for any
+    other event that inadvertently results in a shot at goal (clearance,
+    touch, rebound), so filtering on shotOutcomeType alone catches both
+    without needing to special-case possessionEventType == "SH".
+
+    Own goals need the SCORING team flipped relative to the ACTING
+    team: gameEvents.homeTeam / teamId identify whoever performed the
+    action (cleared/touched/deflected the ball), but for an own goal
+    the goal counts for the opposing team. Detected via
+    _OWN_GOAL_OUTCOME_FIELD -- see its comment above. ASSUMPTION:
+    only verified against the spec text, not against a real own-goal
+    row (I haven't seen one) -- worth checking against a match you know
+    had an own goal before trusting the "(OG)" labeling specifically;
+    the "a goal happened at this time" part is solid either way since
+    it only depends on shotOutcomeType == "G".
+
+    Returns a list of {period, sec, team ('home'/'away'), scorer,
+    ownGoal} dicts, sorted by time. `sec` is periodElapsedTimeEstimate
+    (added by preprocessing.py) -- events with no time estimate are
+    skipped, since they can't be placed on the timeline.
+    """
+    goals = []
+    for ev in events:
+        if ev.get("nonEvent"):
+            continue
+        pe = ev.get("possessionEvents") or {}
+        if pe.get("shotOutcomeType") != "G":
+            continue
+
+        sec = ev.get("periodElapsedTimeEstimate")
+        period = ev.get("period")
+        acting_team_is_home = ev.get("homeTeam")
+        if sec is None or period is None or acting_team_is_home is None:
+            continue
+
+        possession_type = pe.get("possessionEventType")
+        outcome_field = _OWN_GOAL_OUTCOME_FIELD.get(possession_type)
+        own_goal = bool(outcome_field and pe.get(outcome_field) == "D")
+
+        scoring_team_is_home = (not acting_team_is_home) if own_goal else acting_team_is_home
+        scorer = pe.get("shooterPlayerName") or ev.get("playerName")
+
+        goals.append({
+            "period": period,
+            "sec": sec,
+            "team": "home" if scoring_team_is_home else "away",
+            "scorer": scorer,
+            "ownGoal": own_goal,
+        })
+
+    goals.sort(key=lambda g: (g["period"], g["sec"]))
+    return goals
 
 
 def lookup_formation(formations_df, team, period, sec):
@@ -247,12 +328,55 @@ def draw_period_dividers(ax_top, ax_bottom, boundaries):
                 ha="right", va="bottom", fontsize=8, color=TEXT_COLOR)
 
 
+GOAL_COLOR = "#f1c40f"  # gold, distinct from both team/formation colors and grid lines
+
+
+def draw_goals(ax_home, ax_away, goals, offsets):
+    """
+    Marks each goal with a full-height gold line on both panels (so
+    it's visible against whichever formation bar it interrupts) plus a
+    "MM' Scorer" label on the SCORING team's own panel -- own goals are
+    labeled on the panel of the team that benefits from the goal, not
+    the team whose player put it in their own net, since that's the
+    team the goal actually counts for.
+    """
+    for g in goals:
+        off = offsets.get(g["period"], 0.0)
+        t = g["sec"] + off
+        minute = int(t // 60)
+
+        label = f"{minute}' {g['scorer']}" if g["scorer"] else f"{minute}' Goal"
+        if g["ownGoal"]:
+            label += " (OG)"
+
+        for ax in (ax_home, ax_away):
+            ax.axvline(t, color=GOAL_COLOR, linewidth=1.3, linestyle="-",
+                       alpha=0.85, zorder=4)
+
+        target_ax = ax_home if g["team"] == "home" else ax_away
+        target_ax.annotate(
+            f"\u26bd {label}", xy=(t, 1.0), xycoords=("data", "axes fraction"),
+            xytext=(4, 4), textcoords="offset points",
+            ha="left", va="bottom", fontsize=7.5, color=GOAL_COLOR,
+            rotation=60, zorder=5,
+        )
+
+
 def plot_formation_timeline(match_id, processed_dir=PROCESSED_DIR_DEFAULT):
-    formations_df, metadata, home_name, away_name, tracking_path = load_data(match_id, processed_dir)
+    formations_df, metadata, home_name, away_name, tracking_path, match_dir = load_data(match_id, processed_dir)
     offsets, boundaries, total_duration = compute_period_offsets(formations_df, metadata)
     total_duration = max(total_duration, 1.0)
 
     sequences = build_possession_sequences(tracking_path, metadata)
+
+    events = pos.load_events(match_dir)
+    if events is not None:
+        goals = find_goals(events)
+        print(f"  -> {len(goals)} goal(s) found in events.json")
+    else:
+        goals = []
+        print("  no events.json for this match -- skipping goal markers "
+              "(goal detection requires real event data, not the proximity proxy).")
 
     home_bars = sequences_to_bars(sequences, "home", formations_df, offsets)
     away_bars = sequences_to_bars(sequences, "away", formations_df, offsets)
@@ -260,12 +384,14 @@ def plot_formation_timeline(match_id, processed_dir=PROCESSED_DIR_DEFAULT):
     all_formations = sorted({b["formation"] for b in home_bars + away_bars})
     color_of = {f: _PALETTE[i % len(_PALETTE)] for i, f in enumerate(all_formations)}
 
-    fig, (ax_home, ax_away) = plt.subplots(2, 1, figsize=(15, 8), sharex=True)
+    fig, (ax_home, ax_away) = plt.subplots(2, 1, figsize=(15, 8.5), sharex=True,
+                                            gridspec_kw={"hspace": 0.35})
     fig.patch.set_facecolor(BG_COLOR)
 
     draw_team_panel(ax_home, home_bars, color_of, total_duration)
     draw_team_panel(ax_away, away_bars, color_of, total_duration)
     draw_period_dividers(ax_home, ax_away, boundaries)
+    draw_goals(ax_home, ax_away, goals, offsets)
 
     ax_home.set_title(f"{home_name} (home)", loc="left", fontsize=11, color=TEXT_COLOR)
     ax_away.set_title(f"{away_name} (away)", loc="left", fontsize=11, color=TEXT_COLOR)
@@ -289,7 +415,8 @@ def plot_formation_timeline(match_id, processed_dir=PROCESSED_DIR_DEFAULT):
 
     fig.suptitle(
         f"Match {match_id} \u2014 Formation Timeline\n"
-        f"Each bar = one possession sequence  |  Dashed lines = period boundaries",
+        f"Each bar = one possession sequence  |  Dashed lines = period boundaries"
+        + ("  |  \u26bd = goal" if goals else ""),
         fontsize=13, color=TEXT_COLOR
     )
     fig.tight_layout(rect=[0, 0.06, 1, 0.93])

@@ -128,22 +128,30 @@ def bucket_epv_by_second(periods, elapsed, signed_epv):
     return pd.DataFrame(rows)
 
 
-def evaluate_das(sequences, ball_x, ball_y, periods, epv_grid, pitch_length, pitch_width,
+def evaluate_das(sequences, ball_x, ball_y, periods, elapsed, epv_grid, pitch_length, pitch_width,
                   home_dir_p1, away_dir_p1, threshold=DAS_EPV_THRESHOLD,
                   min_duration=DAS_MIN_DURATION_SECONDS):
     """For every possession sequence with a clear team, finds the peak
     EPV reached during it (correctly oriented for that team) and flags
-    it as a DAS if that peak clears `threshold`."""
+    it as a DAS if that peak clears `threshold`.
+
+    Matches sequence to frames by (period, start_sec, end_sec) rather
+    than precomputed frame indices, so this works identically whether
+    `sequences` came from detect_possession_sequences (proximity proxy,
+    which does carry start_idx/end_idx) or
+    possession_sequences_from_events (real events, which don't -- they
+    only have seconds) -- one implementation, either source."""
     rows = []
     for s in sequences:
         if s["team"] not in ("home", "away"):
             continue
         if s["duration"] < min_duration:
             continue
-        i0, i1 = s["start_idx"], s["end_idx"]
+        mask = (periods == s["period"]) & (elapsed >= s["start_sec"]) & (elapsed <= s["end_sec"])
+        idx = np.where(mask)[0]
         direction = pos.attack_direction(s["team"], s["period"], home_dir_p1, away_dir_p1)
         peak = 0.0
-        for i in range(i0, i1 + 1):
+        for i in idx:
             if np.isnan(ball_x[i]) or np.isnan(ball_y[i]):
                 continue
             v = pos.epv_value(epv_grid, float(ball_x[i]), float(ball_y[i]),
@@ -284,13 +292,22 @@ def run_analysis(match_id, processed_dir, epv_grid_path):
     smoothed = pos.smooth_owner(owner, periods, fps)
     sequences = pos.detect_possession_sequences(smoothed, periods, elapsed, fps)
 
-    # DAS specifically uses forward-filled attribution: the most dangerous
-    # instant of a possession (a shot/cross in flight) is exactly when the
-    # ball separates from any single player, which the raw possession
-    # sequences above would treat as a break. See possession.py's
-    # forward_fill_owner docstring for why this matters.
-    das_owner = pos.forward_fill_owner(smoothed, periods, elapsed)
-    das_sequences_input = pos.detect_possession_sequences(das_owner, periods, elapsed, fps)
+    # DAS specifically wants the most accurate possession-sequence
+    # source available. Real events (ground truth) are strongly
+    # preferred; only fall back to the proximity proxy's forward-filled
+    # sequences (see possession.py's forward_fill_owner docstring for
+    # why forward-fill matters for THAT path specifically) when this
+    # match has no events.json.
+    events = pos.load_events(match_dir)
+    if events:
+        print(f"Using {len(events)} real events for possession sequences (ground truth).")
+        home_team_id = metadata.get("homeTeam", {}).get("id")
+        das_sequences_input = pos.possession_sequences_from_events(events, home_team_id)
+    else:
+        print("No events.json for this match -- falling back to proximity-proxy "
+              "possession sequences (forward-filled).")
+        das_owner = pos.forward_fill_owner(smoothed, periods, elapsed)
+        das_sequences_input = pos.detect_possession_sequences(das_owner, periods, elapsed, fps)
 
     print("Computing per-frame EPV...")
     signed_epv = compute_frame_epv(periods, elapsed, ball_x, ball_y, smoothed,
@@ -298,7 +315,7 @@ def run_analysis(match_id, processed_dir, epv_grid_path):
     epv_df = bucket_epv_by_second(periods, elapsed, signed_epv)
 
     print("Evaluating Dangerous Attacking Sequences...")
-    das_df = evaluate_das(das_sequences_input, ball_x, ball_y, periods, epv_grid,
+    das_df = evaluate_das(das_sequences_input, ball_x, ball_y, periods, elapsed, epv_grid,
                            pitch_length, pitch_width, home_dir_p1, away_dir_p1)
 
     epv_out = os.path.join(match_dir, "epv_timeseries.csv")
