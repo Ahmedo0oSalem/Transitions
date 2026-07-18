@@ -482,3 +482,26 @@ def forward_fill_owner(owner_smoothed, periods, elapsed, max_gap_seconds=3.0):
         filled[idx] = o
 
     return filled
+
+
+def compute_possession_percentage(sequences, total_duration=None):
+    """
+    Sums sequence duration per team and returns exact possession time/%.
+
+    total_duration: whole-match seconds (e.g. from compute_period_offsets
+    in epv_das_analysis.py) to use as the denominator. If omitted, uses
+    the sum of accounted-for sequence durations instead (so % excludes
+    loose-ball/no-owner gaps rather than diluting against them).
+    """
+    home_sec = sum(s["duration"] for s in sequences if s["team"] == "home")
+    away_sec = sum(s["duration"] for s in sequences if s["team"] == "away")
+    accounted = home_sec + away_sec
+    denom = total_duration if total_duration is not None else accounted
+
+    return {
+        "home_seconds": home_sec,
+        "away_seconds": away_sec,
+        "home_pct": round(100 * home_sec / denom, 2) if denom else 0.0,
+        "away_pct": round(100 * away_sec / denom, 2) if denom else 0.0,
+        "unaccounted_seconds": max(0.0, denom - accounted),
+    }

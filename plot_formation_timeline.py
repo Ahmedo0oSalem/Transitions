@@ -3,19 +3,19 @@ plot_formation_timeline.py
 
 Plots each team's detected formation over time as a colored "piano roll":
 one row per formation, colored horizontal bars showing when that
-formation was detected -- one bar per POSSESSION SEQUENCE (not per raw
-sliding-window row).
+formation was detected -- one bar per CONTINUOUS STRETCH in that
+formation (built directly from formations.csv's sliding windows,
+independent of who has the ball).
 
-CHANGE FROM THE PREVIOUS VERSION: bars now correspond to possession
-sequences (via possession.py's proximity-based "who has the ball"
-heuristic, run-length encoded and flicker-smoothed) rather than raw,
-overlapping formations.csv rows. For each possession sequence, we look
-up whichever formations.csv window was "current" at that sequence's
-midpoint and use that as the sequence's formation label. This is closer
-to "what shape was this team in during this spell of play" than the
-previous raw/overlapping view, at the cost of depending on the
-possession heuristic (see possession.py's caveat: no real possession
-events exist in this data, so treat sequence boundaries as approximate).
+CHANGE FROM THE PREVIOUS (POSSESSION-GATED) VERSION: bars used to only
+appear during a team's OWN possession sequences, which meant a team's
+panel went blank while the other team had the ball. That hid exactly
+the thing worth seeing -- what shape a team holds while defending vs.
+attacking. Bars now come straight from formations.csv for that team,
+merging consecutive/overlapping sliding-window rows that agree on the
+same formation into one continuous run, so each panel shows the team's
+detected shape continuously through the whole match, both in and out of
+possession.
 
 ALSO: goal markers, if Processed_Tracking/<match_id>/events.json exists
 (written by preprocessing.py's process_events() from Event_Data/, see
@@ -31,8 +31,10 @@ USAGE:
 REQUIRES:
     Processed_Tracking/<match_id>/formations.csv       (from detect_formations.py)
     Processed_Tracking/<match_id>/metadata.json
-    Processed_Tracking/<match_id>/tracking.jsonl.bz2   (possession sequences are
-                                                         derived directly from this)
+    Processed_Tracking/<match_id>/tracking.jsonl.bz2   (still required by load_data;
+                                                         no longer used for bars, but
+                                                         kept as a sanity check that
+                                                         this is a fully-processed match)
     Processed_Tracking/<match_id>/events.json          (optional -- enables goal
                                                          markers if present)
     possession.py and detect_formations.py in the same folder as this script.
@@ -99,6 +101,8 @@ def load_data(match_id, processed_dir):
 
 
 def build_possession_sequences(tracking_path, metadata):
+    """No longer used to build the timeline bars (see module docstring),
+    kept here in case it's useful elsewhere -- left untouched."""
     pitch_length = metadata["pitch"]["length"]
     pitch_width = metadata["pitch"]["width"]
 
@@ -255,11 +259,61 @@ def build_xticks(total_duration, window_seconds):
     return cleaned
 
 
+def formation_runs_from_windows(formations_df, team, offsets):
+    """
+    Builds continuous formation bars directly from formations.csv's
+    sliding windows for `team`, WITHOUT gating on possession -- this is
+    what makes the panel show the team's formation continuously, both
+    while attacking and while defending. Consecutive/overlapping
+    windows that agree on the same formation are merged into one
+    continuous run; a change in formation, or a gap where window
+    coverage stops (e.g. MIN_FRAMES_PER_WINDOW trimmed a window near a
+    period's tail), starts a new bar.
+    """
+    sub = formations_df[formations_df["team"] == team].copy()
+    if sub.empty:
+        return []
+    sub = sub.sort_values(["period", "windowStartSec"])
+
+    bars = []
+    current = None
+    for _, row in sub.iterrows():
+        off = offsets.get(row["period"], 0.0)
+        start = row["windowStartSec"] + off
+        end = row["windowEndSec"] + off
+        formation = row["formation"]
+
+        same_run = (
+            current is not None
+            and current["formation"] == formation
+            and current["period"] == row["period"]
+            and start <= current["matchEnd"]
+        )
+        if same_run:
+            current["matchEnd"] = max(current["matchEnd"], end)
+        else:
+            if current is not None:
+                bars.append(current)
+            current = {
+                "formation": formation,
+                "period": row["period"],
+                "matchStart": start,
+                "matchEnd": end,
+            }
+    if current is not None:
+        bars.append(current)
+
+    for b in bars:
+        b["duration"] = b["matchEnd"] - b["matchStart"]
+        del b["period"]
+    return bars
+
+
 def sequences_to_bars(sequences, team, formations_df, offsets):
-    """Attaches a formation label to each of `team`'s possession
-    sequences and converts sequence time -> continuous match time.
-    Drops sequences with no resolvable formation (e.g. before the first
-    formations.csv window starts)."""
+    """No longer used to build the timeline bars (see module docstring),
+    kept here in case it's useful elsewhere -- left untouched. Attaches
+    a formation label to each of `team`'s possession sequences and
+    converts sequence time -> continuous match time."""
     bars = []
     for s in sequences:
         if s["team"] != team:
@@ -367,8 +421,6 @@ def plot_formation_timeline(match_id, processed_dir=PROCESSED_DIR_DEFAULT):
     offsets, boundaries, total_duration = compute_period_offsets(formations_df, metadata)
     total_duration = max(total_duration, 1.0)
 
-    sequences = build_possession_sequences(tracking_path, metadata)
-
     events = pos.load_events(match_dir)
     if events is not None:
         goals = find_goals(events)
@@ -378,8 +430,8 @@ def plot_formation_timeline(match_id, processed_dir=PROCESSED_DIR_DEFAULT):
         print("  no events.json for this match -- skipping goal markers "
               "(goal detection requires real event data, not the proximity proxy).")
 
-    home_bars = sequences_to_bars(sequences, "home", formations_df, offsets)
-    away_bars = sequences_to_bars(sequences, "away", formations_df, offsets)
+    home_bars = formation_runs_from_windows(formations_df, "home", offsets)
+    away_bars = formation_runs_from_windows(formations_df, "away", offsets)
 
     all_formations = sorted({b["formation"] for b in home_bars + away_bars})
     color_of = {f: _PALETTE[i % len(_PALETTE)] for i, f in enumerate(all_formations)}
@@ -415,7 +467,7 @@ def plot_formation_timeline(match_id, processed_dir=PROCESSED_DIR_DEFAULT):
 
     fig.suptitle(
         f"Match {match_id} \u2014 Formation Timeline\n"
-        f"Each bar = one possession sequence  |  Dashed lines = period boundaries"
+        f"Each bar = continuous stretch in that formation (attacking + defending)  |  Dashed lines = period boundaries"
         + ("  |  \u26bd = goal" if goals else ""),
         fontsize=13, color=TEXT_COLOR
     )
@@ -425,7 +477,7 @@ def plot_formation_timeline(match_id, processed_dir=PROCESSED_DIR_DEFAULT):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Plot each team's detected formation over time, one bar per possession sequence."
+        description="Plot each team's detected formation over time, continuously (attacking + defending)."
     )
     parser.add_argument("match_id")
     parser.add_argument("--processed-dir", default=PROCESSED_DIR_DEFAULT)

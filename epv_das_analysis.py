@@ -217,6 +217,11 @@ def plot_momentum(epv_df, das_df, offsets, boundaries, total_duration,
             y_pos = row["peakEPV"] if row["team"] == "home" else -row["peakEPV"]
             ax.scatter([t], [y_pos], marker=marker, s=70, color=color,
                        edgecolors="white", linewidths=0.8, zorder=3)
+            ax.annotate(f"{row['peakEPV']:.3f}", (t, y_pos),
+                        textcoords="offset points",
+                        xytext=(0, 8 if row["team"] == "home" else -12),
+                        ha="center", fontsize=7, color=TEXT_COLOR, zorder=4)
+
 
     for boundary_time, period in boundaries[:-1]:
         ax.axvline(boundary_time, color=GRID_COLOR, linewidth=1.2, linestyle="--", zorder=0)
@@ -235,7 +240,11 @@ def plot_momentum(epv_df, das_df, offsets, boundaries, total_duration,
         f"\u25b2/\u25bc markers = Dangerous Attacking Sequences (peak EPV \u2265 {DAS_EPV_THRESHOLD})",
         color=TEXT_COLOR, fontsize=12
     )
+    ax.format_coord = lambda x, y: f"Time: {format_mmss(x)}   EPV momentum: {y:.4f}"
+
     fig.tight_layout()
+  
+    
     return fig
 
 
@@ -253,6 +262,11 @@ def plot_das_timeline(das_df, offsets, boundaries, total_duration, home_name, aw
         if len(sub):
             ax.scatter(sub["matchSec"], [y] * len(sub), s=sub["peakEPV"] * 800 + 40,
                        color=color, alpha=0.85, edgecolors="white", linewidths=0.6, zorder=2)
+            for _, r in sub.iterrows():
+                ax.annotate(f"{r['peakEPV']:.3f}", (r["matchSec"], y),
+                            textcoords="offset points",
+                            xytext=(0, 10 if team == "home" else -14),
+                            ha="center", fontsize=6.5, color=TEXT_COLOR, zorder=3)
 
     for boundary_time, period in boundaries[:-1]:
         ax.axvline(boundary_time, color=GRID_COLOR, linewidth=1.2, linestyle="--", zorder=0)
@@ -268,6 +282,8 @@ def plot_das_timeline(das_df, offsets, boundaries, total_duration, home_name, aw
     ax.set_xlabel("Match Time", color=TEXT_COLOR)
     ax.set_title(f"Match {match_id} \u2014 Dangerous Attacking Sequences "
                  f"(marker size = peak EPV)", color=TEXT_COLOR, fontsize=12)
+    ax.format_coord = lambda x, y: f"Time: {format_mmss(x)}   Team: {home_name if y > 0.5 else away_name}"
+
     fig.tight_layout()
     return fig
 
@@ -338,7 +354,19 @@ def run_analysis(match_id, processed_dir, epv_grid_path):
     print(f"Mean signed EPV (whole match, +ve = {home_name} dominant): {epv_df['meanSignedEPV'].mean():.4f}")
 
     offsets, boundaries, total_duration = compute_period_offsets(metadata)
-
+    
+    poss = pos.compute_possession_percentage(das_sequences_input, total_duration=total_duration)
+    print("\n=== Possession (exact) ===")
+    print(f"{home_name}: {poss['home_seconds']:.1f}s ({poss['home_pct']:.1f}%)")
+    print(f"{away_name}: {poss['away_seconds']:.1f}s ({poss['away_pct']:.1f}%)")
+    print(f"Unaccounted (loose ball / gaps): {poss['unaccounted_seconds']:.1f}s")
+       
+    if len(das_df):
+        peak_row = das_df.loc[das_df["peakEPV"].idxmax()]
+        peak_min = int((peak_row["startSec"] + offsets.get(peak_row["period"], 0.0)) // 60)
+        print(f"Highest EPV reached: {peak_row['peakEPV']:.4f} "
+              f"by {home_name if peak_row['team']=='home' else away_name} "
+              f"at ~{peak_min}'")
     fig1 = plot_momentum(epv_df, das_df, offsets, boundaries, total_duration, home_name, away_name, match_id)
     fig2 = plot_das_timeline(das_df, offsets, boundaries, total_duration, home_name, away_name, match_id)
     return fig1, fig2
