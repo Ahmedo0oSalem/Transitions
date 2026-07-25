@@ -17,6 +17,21 @@ same formation into one continuous run, so each panel shows the team's
 detected shape continuously through the whole match, both in and out of
 possession.
 
+CHANGE FROM THE PREVIOUS (RAW-WINDOW-MERGE) VERSION: bars used to be
+built by directly merging formations.csv's raw window rows
+(formation_runs_from_windows), with no regard for how reliable any
+given window actually was. Now that detect_formation.py writes a
+'confidence' column per window (frame-reliability-weighted: how much
+real signal fed it, times how well that signal fit a template), bars
+are built by a WEIGHTED VOTE at each point in time
+(resolve_formation_by_vote / formation_runs_from_votes) among every
+overlapping window covering that instant -- a window contaminated by a
+foul/stoppage/high-velocity moment gets outvoted by cleaner overlapping
+windows even if there happen to be fewer of them, rather than either
+being merged in uncritically or winning a tiebreak just for starting
+more recently (the even older lookup_formation behavior). Both older
+approaches are kept in this file, unused, for reference/comparison.
+
 ALSO: goal markers, if Processed_Tracking/<match_id>/events.json exists
 (written by preprocessing.py's process_events() from Event_Data/, see
 find_goals()'s docstring). A gold vertical line marks the moment on both
@@ -190,9 +205,11 @@ def find_goals(events):
 
 
 def lookup_formation(formations_df, team, period, sec):
-    """Formation label whichever formations.csv window is 'current' at
-    time `sec` into `period` (freshest-starting overlapping window, same
-    logic as detect_formations/visualize_match use elsewhere)."""
+    """SUPERSEDED by resolve_formation_by_vote (below) -- kept for
+    reference/comparison, no longer called from the active path.
+    Formation label from whichever formations.csv window is 'current'
+    at time `sec` into `period` (freshest-starting overlapping window),
+    with NO regard for how reliable that window actually was."""
     sub = formations_df[
         (formations_df["team"] == team)
         & (formations_df["period"] == period)
@@ -202,6 +219,36 @@ def lookup_formation(formations_df, team, period, sec):
     if sub.empty:
         return None
     return sub.loc[sub["windowStartSec"].idxmax(), "formation"]
+
+
+def resolve_formation_by_vote(formations_df, team, period, sec):
+    """
+    Weighted vote among every window (for `team`/`period`) whose
+    [windowStartSec, windowEndSec) covers `sec`, using each window's
+    'confidence' column (from detect_formation.py's frame_reliability
+    integration -- sum of that window's frame-reliability weights times
+    how well its average shape fit a template) as its vote weight.
+
+    This is NOT "pick whichever window started most recently"
+    (lookup_formation, above) -- it's a genuine reliability-weighted
+    vote: a window contaminated by a foul/stoppage/high-velocity moment
+    gets outvoted by cleaner overlapping windows even if there happen
+    to be fewer of them. See the conversation that designed this for
+    the worked numeric example.
+
+    Falls back to weight=1 per window (a plain majority-by-count vote)
+    if this formations.csv predates the 'confidence' column, so an
+    older formations.csv doesn't crash this script.
+    """
+    sub = formations_df[
+        (formations_df["team"] == team) & (formations_df["period"] == period)
+        & (formations_df["windowStartSec"] <= sec) & (sec < formations_df["windowEndSec"])
+    ]
+    if sub.empty:
+        return None
+    weight = sub["confidence"] if "confidence" in sub.columns else pd.Series(1.0, index=sub.index)
+    scores = weight.groupby(sub["formation"]).sum()
+    return scores.idxmax()
 
 
 def infer_stride_seconds(df):
@@ -261,14 +308,12 @@ def build_xticks(total_duration, window_seconds):
 
 def formation_runs_from_windows(formations_df, team, offsets):
     """
-    Builds continuous formation bars directly from formations.csv's
-    sliding windows for `team`, WITHOUT gating on possession -- this is
-    what makes the panel show the team's formation continuously, both
-    while attacking and while defending. Consecutive/overlapping
-    windows that agree on the same formation are merged into one
-    continuous run; a change in formation, or a gap where window
-    coverage stops (e.g. MIN_FRAMES_PER_WINDOW trimmed a window near a
-    period's tail), starts a new bar.
+    SUPERSEDED by formation_runs_from_votes (below) -- kept for
+    reference/comparison, no longer called from the active path. Builds
+    continuous formation bars directly from formations.csv's sliding
+    windows for `team`, merging consecutive/overlapping windows that
+    agree on the same formation, WITHOUT weighting by how reliable each
+    window was.
     """
     sub = formations_df[formations_df["team"] == team].copy()
     if sub.empty:
@@ -300,6 +345,62 @@ def formation_runs_from_windows(formations_df, team, offsets):
                 "matchStart": start,
                 "matchEnd": end,
             }
+    if current is not None:
+        bars.append(current)
+
+    for b in bars:
+        b["duration"] = b["matchEnd"] - b["matchStart"]
+        del b["period"]
+    return bars
+
+
+def formation_runs_from_votes(formations_df, team, offsets):
+    """
+    ACTIVE bar-building path. Takes a WEIGHTED VOTE (resolve_formation_by_vote)
+    at every stride-sized step through each period, then merges
+    consecutive steps that agree into one continuous bar -- the
+    confidence-aware replacement for formation_runs_from_windows, which
+    just merged raw window rows with no regard for how reliable each
+    one was.
+    """
+    sub = formations_df[formations_df["team"] == team]
+    if sub.empty:
+        return []
+
+    stride = infer_stride_seconds(formations_df)
+    if stride <= 0:
+        stride = 60
+
+    bars = []
+    current = None
+    for period in sorted(sub["period"].unique()):
+        off = offsets.get(period, 0.0)
+        period_sub = sub[sub["period"] == period]
+        t_max = period_sub["windowEndSec"].max()
+
+        t = 0.0
+        while t < t_max:
+            formation = resolve_formation_by_vote(formations_df, team, period, t)
+            if formation is not None:
+                match_t = t + off
+                same_run = (
+                    current is not None
+                    and current["formation"] == formation
+                    and current["period"] == period
+                    and match_t <= current["matchEnd"] + stride * 1.01
+                )
+                if same_run:
+                    current["matchEnd"] = max(current["matchEnd"], match_t + stride)
+                else:
+                    if current is not None:
+                        bars.append(current)
+                    current = {
+                        "formation": formation,
+                        "period": period,
+                        "matchStart": match_t,
+                        "matchEnd": match_t + stride,
+                    }
+            t += stride
     if current is not None:
         bars.append(current)
 
@@ -430,8 +531,8 @@ def plot_formation_timeline(match_id, processed_dir=PROCESSED_DIR_DEFAULT):
         print("  no events.json for this match -- skipping goal markers "
               "(goal detection requires real event data, not the proximity proxy).")
 
-    home_bars = formation_runs_from_windows(formations_df, "home", offsets)
-    away_bars = formation_runs_from_windows(formations_df, "away", offsets)
+    home_bars = formation_runs_from_votes(formations_df, "home", offsets)
+    away_bars = formation_runs_from_votes(formations_df, "away", offsets)
 
     all_formations = sorted({b["formation"] for b in home_bars + away_bars})
     color_of = {f: _PALETTE[i % len(_PALETTE)] for i, f in enumerate(all_formations)}

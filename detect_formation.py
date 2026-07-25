@@ -7,9 +7,18 @@ mplsoccer's built-in formation templates as reference shapes.
 
 METHOD (standard approach, e.g. Bialkowski et al. 2014, and the EFPI paper
 which does the same thing with mplsoccer's templates):
-  1. For each window, compute each outfield player's AVERAGE (x, y)
-     position over all frames in that window (this smooths out
-     instantaneous movement/noise and reveals the underlying shape).
+  1. For each window, compute each outfield player's WEIGHTED average
+     (x, y) position over all frames in that window. If events.json is
+     available (see frame_reliability.py), each frame gets a
+     reliability weight in [0,1] first -- a frame near a foul, dead
+     ball, set-piece restart, substitution, or possession turnover, or
+     during unusually fast team repositioning, counts for LESS than a
+     calm, settled frame, rather than counting exactly the same (the
+     old plain-average behavior, still used as-is when there's no
+     events.json for a match). This is what actually fixes the
+     "overlapping/contradictory formations in the same few minutes"
+     problem -- a contaminated frame no longer pulls the average as
+     hard as an uncontaminated one.
   2. Exclude the goalkeeper. The GK for each side is read directly from
      metadata.json (populated by preprocessing.py from the match roster:
      the starting player with positionGroupType == "GK"). If a match has
@@ -22,15 +31,24 @@ which does the same thing with mplsoccer's templates):
      the 10 template positions, minimizing total squared distance.
   4. The template with the lowest total cost is the detected formation
      for that team in that window.
-  5. A team can be attacking left->right or right->left, and this flips
+  5. Each window also gets a CONFIDENCE score: (sum of that window's
+     frame weights) x (fit_quality, derived from the Hungarian cost --
+     how well the average shape actually matched a template). Windows
+     below frame_reliability.MIN_WINDOW_CONFIDENCE are dropped entirely
+     -- the confidence-based replacement for the old hard
+     MIN_FRAMES_PER_WINDOW-only cutoff. Downstream tools (e.g.
+     plot_formation_timeline.py) use this confidence to WEIGHT-VOTE
+     among overlapping windows at any given instant, rather than just
+     picking whichever window started most recently.
+  6. A team can be attacking left->right or right->left, and this flips
      every period (teams swap ends at half-time, and again each extra-time
      half). Rather than trying both orientations of every template and
      keeping whichever is cheaper, we compute the correct orientation
      directly from metadata's "homeTeamStartLeft" + the period number, and
      only match against that one orientation. This is faster and removes
      the (small) risk of a "mirrored" formation winning by fluke.
-     !!! VERIFY get_orientation()'s assumption against a known frame/video
-     before trusting this for a full run -- see the comment above it. !!!
+     !!! VERIFIED for at least one real match this session -- see
+     get_orientation()'s docstring for how to re-verify on new data. !!!
 
 REQUIRES:
     pip install mplsoccer scipy numpy pandas --break-system-packages
@@ -75,6 +93,13 @@ from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
 from mplsoccer import Pitch
 
+from tracking_fields import (
+    PLAYER_ID_KEYS, PLAYER_X_KEYS, PLAYER_Y_KEYS, PLAYER_NUMBER_KEYS,
+    REJECT_CONFIDENCE_VALUES, REJECT_VISIBILITY_VALUES,
+    _get_first, extract_player_xy,
+)
+import frame_reliability
+
 
 # ==========================
 # Configuration
@@ -103,28 +128,16 @@ MIN_FRAMES_PER_WINDOW = 30
 # skipped rather than guessed.
 MIN_OUTFIELD_PLAYERS = 9
 
-# Field name aliases we will try (in order) when reading each player
-# dict in homePlayers/awayPlayers, so this works across a few common
-# provider schemas without you having to rewrite the parsing loop.
-# ADD/EDIT these if your schema uses different keys.
-PLAYER_ID_KEYS = ["jerseyNum", "playerId", "player_id", "id", "optaId", "ssiId"]
-PLAYER_X_KEYS = ["x", "X"]
-PLAYER_Y_KEYS = ["y", "Y"]
-PLAYER_NUMBER_KEYS = ["number", "shirtNumber", "jerseyNumber", "num"]
+# Field name aliases (PLAYER_ID_KEYS, PLAYER_X_KEYS, PLAYER_Y_KEYS,
+# PLAYER_NUMBER_KEYS) and quality-flag filtering (REJECT_CONFIDENCE_VALUES,
+# REJECT_VISIBILITY_VALUES) now live in tracking_fields.py, imported above --
+# edit them there; possession.py and frame_reliability.py read the same
+# values via that shared module, so this is the one place to change them.
 
 # If your tracking coordinates are already 0..pitch_length / 0..pitch_width
 # set this to False. If they are centered on (0,0), e.g. x in
 # [-length/2, length/2], leave this True and we will shift them.
 COORDS_ARE_CENTERED = True
-
-# Some providers tag each point with a quality flag (e.g. "confidence":
-# "HIGH"/"MEDIUM"/"LOW", "visibility": "VISIBLE"/"ESTIMATED"). LOW-confidence
-# points are often noisy/extrapolated and can wreck the goalkeeper heuristic
-# (spurious jumps make a stationary GK look like it's roaming) and blur the
-# averaged formation shape. If your data has these fields, points matching
-# any of these will be DROPPED. Set to None/[] to disable filtering.
-REJECT_CONFIDENCE_VALUES = ["LOW"]
-REJECT_VISIBILITY_VALUES = []  # e.g. ["ESTIMATED"] to also drop interpolated points
 
 # Minimum number of tracked points a player needs before they're considered
 # a candidate for goalkeeper identification. Without this, a substitute who
@@ -233,27 +246,9 @@ def get_orientation(team_key, period, home_team_start_left):
 
 
 # ==========================
-# Helpers to read player dicts robustly
+# Helpers to read player dicts robustly -- see tracking_fields.py
+# (_get_first, extract_player_xy imported above)
 # ==========================
-
-def _get_first(d, keys, default=None):
-    for k in keys:
-        if k in d:
-            return d[k]
-    return default
-
-
-def extract_player_xy(player_dict):
-    if REJECT_CONFIDENCE_VALUES and player_dict.get("confidence") in REJECT_CONFIDENCE_VALUES:
-        return None
-    if REJECT_VISIBILITY_VALUES and player_dict.get("visibility") in REJECT_VISIBILITY_VALUES:
-        return None
-    x = _get_first(player_dict, PLAYER_X_KEYS)
-    y = _get_first(player_dict, PLAYER_Y_KEYS)
-    pid = _get_first(player_dict, PLAYER_ID_KEYS)
-    if x is None or y is None or pid is None:
-        return None
-    return pid, float(x), float(y)
 
 
 # ==========================
@@ -397,16 +392,30 @@ def get_window_indices(elapsed_seconds):
 
 
 def accumulate_positions(tracking_path, goalkeepers, pitch_length, pitch_width,
-                          team_keys=("homePlayers", "awayPlayers")):
+                          weight_lookup=None, team_keys=("homePlayers", "awayPlayers")):
     """
     Streams through the tracking file, bucketing each outfield player's
-    (x, y) into (team, period, window_index) buckets. With sliding windows
-    (STRIDE_SECONDS < WINDOW_SECONDS) a single frame contributes to every
-    overlapping window it falls inside. Returns:
+    (x, y, weight) into (team, period, window_index) buckets. With
+    sliding windows (STRIDE_SECONDS < WINDOW_SECONDS) a single frame
+    contributes to every overlapping window it falls inside.
 
-        buckets[(team, period, window_index)][player_id] -> list of (x, y)
+    weight_lookup (from frame_reliability.compute_frame_weights), if
+    given, supplies a per-frame, per-team reliability weight in [0,1] --
+    a frame near a foul/stoppage/high-velocity moment counts for less
+    toward the window's average position, instead of counting exactly
+    as much as a calm, settled frame (the old behavior). If None, every
+    frame gets weight 1.0 (equivalent to the old plain averaging).
+
+    Returns:
+        buckets[(team, period, window_index)][player_id] -> list of (x, y, weight)
+        window_weight_sum[(team, period, window_index)] -> sum of frame
+            weights contributed to that window (used for window
+            confidence in process_match) -- tracked once per window per
+            FRAME, not per player, since it's a property of the frame/
+            window, not of any individual player within it.
     """
     buckets = defaultdict(lambda: defaultdict(list))
+    window_weight_sum = defaultdict(float)
     x_shift = pitch_length / 2 if COORDS_ARE_CENTERED else 0.0
     y_shift = pitch_width / 2 if COORDS_ARE_CENTERED else 0.0
 
@@ -422,9 +431,19 @@ def accumulate_positions(tracking_path, goalkeepers, pitch_length, pitch_width,
                     continue
 
                 window_indices = list(get_window_indices(elapsed))
+                frame_weights = None
+                if weight_lookup is not None:
+                    frame_weights = weight_lookup.get(period, {}).get(elapsed)
 
                 for team in team_keys:
                     gk_ids = goalkeepers.get(team) or set()
+                    w = 1.0
+                    if frame_weights is not None:
+                        w = frame_weights.get(team, 1.0)
+
+                    for k in window_indices:
+                        window_weight_sum[(team, period, k)] += w
+
                     for p in frame.get(team, []):
                         parsed = extract_player_xy(p)
                         if parsed is None:
@@ -432,15 +451,29 @@ def accumulate_positions(tracking_path, goalkeepers, pitch_length, pitch_width,
                         pid, x, y = parsed
                         if str(pid) in gk_ids:
                             continue  # exclude goalkeeper
-                        xy = (x + x_shift, y + y_shift)
+                        xyw = (x + x_shift, y + y_shift, w)
                         for k in window_indices:
-                            buckets[(team, period, k)][pid].append(xy)
+                            buckets[(team, period, k)][pid].append(xyw)
     except EOFError:
         print(f"    !! WARNING: {tracking_path} appears truncated/corrupted "
               f"(bz2 stream ended early after {n_lines} frames). "
               f"Continuing with the frames successfully read.")
 
-    return buckets
+    return buckets, window_weight_sum
+
+
+def _load_events(match_dir):
+    """
+    Loads events.json if present (written by preprocessing.py). This is
+    a plain file load, not a call into possession.py's load_events --
+    possession.py imports this module for shared primitives, so this
+    module importing possession.py back would create a circular import.
+    """
+    path = os.path.join(match_dir, "events.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 # ==========================
@@ -470,21 +503,49 @@ def process_match(match_id, processed_dir=PROCESSED_DIR):
     goalkeepers = resolve_goalkeepers(tracking_path, metadata)
     print(f"[{match_id}] goalkeepers: {goalkeepers}")
 
+    events = _load_events(match_dir)
+    weight_lookup = None
+    if events:
+        print(f"[{match_id}] computing frame-reliability weights from "
+              f"{len(events)} events + tracking (foul/dead-ball/set-piece/sub/"
+              f"turnover decay + centroid-velocity/surface-area scoring)...")
+        weight_lookup, info = frame_reliability.compute_frame_weights(
+            tracking_path, metadata, events, goalkeepers,
+            coords_are_centered=COORDS_ARE_CENTERED,
+        )
+        print(f"[{match_id}] weighting inputs: {info}")
+    else:
+        print(f"[{match_id}] no events.json -- frame weighting disabled "
+              f"(every frame weight 1.0, same as the old plain average).")
+
     print(f"[{match_id}] accumulating positions into {WINDOW_SECONDS}s windows "
           f"(stride {STRIDE_SECONDS}s)...")
-    buckets = accumulate_positions(tracking_path, goalkeepers, pitch_length, pitch_width)
+    buckets, window_weight_sum = accumulate_positions(
+        tracking_path, goalkeepers, pitch_length, pitch_width, weight_lookup=weight_lookup)
 
+    n_dropped_low_confidence = 0
     rows = []
     for (team, period, window_index), players in sorted(buckets.items()):
         n_frames = sum(len(v) for v in players.values())
         if n_frames < MIN_FRAMES_PER_WINDOW:
             continue
 
-        # Average position per player over the window.
+        # Weighted average position per player over the window -- a
+        # frame with low reliability weight (foul/stoppage/high
+        # velocity nearby) counts less toward this average than a
+        # calm, settled frame. Falls back to a plain mean for a player
+        # whose every frame in this window was fully suppressed
+        # (weight sum ~0), rather than dividing by zero.
         avg_xy = []
         for pid, coords in players.items():
-            arr = np.array(coords, dtype=float)
-            avg_xy.append(arr.mean(axis=0))
+            arr = np.array(coords, dtype=float)  # columns: x, y, weight
+            w = arr[:, 2]
+            wsum = w.sum()
+            if wsum > 1e-9:
+                avg = (arr[:, :2] * w[:, None]).sum(axis=0) / wsum
+            else:
+                avg = arr[:, :2].mean(axis=0)
+            avg_xy.append(avg)
         avg_xy = np.array(avg_xy)
 
         if avg_xy.shape[0] < MIN_OUTFIELD_PLAYERS:
@@ -492,6 +553,19 @@ def process_match(match_id, processed_dir=PROCESSED_DIR):
 
         orientation = get_orientation(team, period, home_team_start_left)
         formation, cost, _assigned_names = match_formation(avg_xy, templates, orientation)
+
+        # Window confidence: how much real, reliable signal fed this
+        # window's average (sum of frame weights) times how well that
+        # signal actually fit a template (fit_quality, derived from the
+        # existing Hungarian-match cost -- lower cost = better fit).
+        # Windows below MIN_WINDOW_CONFIDENCE are dropped entirely --
+        # the confidence-based replacement for the old hard
+        # MIN_FRAMES_PER_WINDOW-only cutoff.
+        fit_quality = 1.0 / (1.0 + cost)
+        window_confidence = window_weight_sum.get((team, period, window_index), 0.0) * fit_quality
+        if window_confidence < frame_reliability.MIN_WINDOW_CONFIDENCE:
+            n_dropped_low_confidence += 1
+            continue
 
         window_start = window_index * STRIDE_SECONDS
         window_end = window_start + WINDOW_SECONDS
@@ -508,7 +582,12 @@ def process_match(match_id, processed_dir=PROCESSED_DIR):
             "formation": formation,
             "orientation": orientation,
             "avgCostPerPlayer": round(float(cost), 3),
+            "confidence": round(float(window_confidence), 4),
         })
+
+    if n_dropped_low_confidence:
+        print(f"[{match_id}] dropped {n_dropped_low_confidence} window(s) below "
+              f"MIN_WINDOW_CONFIDENCE ({frame_reliability.MIN_WINDOW_CONFIDENCE}).")
 
     out_df = pd.DataFrame(rows).sort_values(["team", "period", "windowIndex"])
     out_path = os.path.join(match_dir, "formations.csv")
