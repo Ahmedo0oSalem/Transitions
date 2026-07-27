@@ -10,11 +10,13 @@ period). This replaces the previous possession-sequence approach.
 
 ALSO: goal markers, if Processed_Tracking/<match_id>/events.json exists
 (written by preprocessing.py's process_events() from Event_Data/, see
-find_goals()'s docstring). A gold vertical line marks the moment on both
-panels; a "MM' Scorer" label (with "(OG)" for own goals) is placed on
-the SCORING team's panel. Silently skipped -- with a printed note, not
-an error -- for matches with no events.json, since goal detection needs
-real event data (shotOutcomeType), not the tracking-only proxy.
+find_goals()'s docstring). A vertical line marks the moment on both
+panels, colour-coded by perspective: green = this panel's team scored,
+red = this panel's team conceded. A "MM' Scorer" label (with "(OG)" for
+own goals) is placed on the SCORING team's panel. Silently skipped --
+with a printed note, not an error -- for matches with no events.json,
+since goal detection needs real event data (shotOutcomeType), not the
+tracking-only proxy.
 
 USAGE:
     python plot_formation_timeline.py <match_id> [--processed-dir DIR]
@@ -40,7 +42,7 @@ import pandas as pd
 
 from ..analytics import possession as pos
 from ..io.paths import PROCESSED_DIR, match_dir
-from .theme import FIG_FACE, GRID, BASELINE, TEXT_PRIMARY, GOAL_COLOR
+from .theme import FIG_FACE, GRID, BASELINE, TEXT_PRIMARY
 
 PROCESSED_DIR_DEFAULT = str(PROCESSED_DIR)
 
@@ -48,6 +50,10 @@ BG_COLOR = FIG_FACE
 GRID_COLOR = GRID
 BASELINE_COLOR = BASELINE
 TEXT_COLOR = TEXT_PRIMARY
+
+# Goal marker colours: scored = green, conceded = red
+SCORED_COLOR = "#2ecc71"
+CONCEDED_COLOR = "#d62728"
 
 _PALETTE = [matplotlib.colors.to_hex(c) for c in
             list(plt.get_cmap("tab20").colors) + list(plt.get_cmap("tab20b").colors)]
@@ -289,6 +295,13 @@ def draw_period_dividers(ax_top, ax_bottom, boundaries):
 
 
 def draw_goals(ax_home, ax_away, goals, offsets):
+    """Draw goal markers.
+
+    On each panel the line is colour-coded by perspective:
+    *scored* (this panel's team scored) = green, *conceded* (the
+    opponent scored) = red. The label is always green (scored from
+    the scoring team's perspective).
+    """
     for g in goals:
         off = offsets.get(g["period"], 0.0)
         t = g["sec"] + off
@@ -298,15 +311,16 @@ def draw_goals(ax_home, ax_away, goals, offsets):
         if g["ownGoal"]:
             label += " (OG)"
 
-        for ax in (ax_home, ax_away):
-            ax.axvline(t, color=GOAL_COLOR, linewidth=1.3, linestyle="-",
+        for ax, panel_team in [(ax_home, "home"), (ax_away, "away")]:
+            color = SCORED_COLOR if g["team"] == panel_team else CONCEDED_COLOR
+            ax.axvline(t, color=color, linewidth=1.3, linestyle="-",
                        alpha=0.85, zorder=4)
 
         target_ax = ax_home if g["team"] == "home" else ax_away
         target_ax.annotate(
             f"\u26bd {label}", xy=(t, 1.0), xycoords=("data", "axes fraction"),
             xytext=(4, 4), textcoords="offset points",
-            ha="left", va="bottom", fontsize=7.5, color=GOAL_COLOR,
+            ha="left", va="bottom", fontsize=7.5, color=SCORED_COLOR,
             rotation=60, zorder=5,
         )
 

@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QSplitter,
@@ -106,19 +107,46 @@ class Worker(QObject):
 
 
 class FigureTab(QWidget):
-    """Widget hosting a matplotlib figure + navigation toolbar."""
+    """Widget hosting a matplotlib figure + navigation toolbar.
+
+    The canvas grows to fill available space, but never shrinks below a
+    legible minimum — below that, a scrollbar appears instead of the
+    plot becoming unreadable.
+    """
+
+    # Tune these to taste — this is the floor below which we scroll
+    # instead of shrinking further.
+    MIN_CANVAS_WIDTH = 480
+    MIN_CANVAS_HEIGHT = 320
 
     def __init__(self, title: str, figure) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
+
         canvas = figure.canvas
         if not isinstance(canvas, FigureCanvasQTAgg):
             canvas = FigureCanvasQTAgg(figure)
         canvas.setParent(self)
+
+        canvas.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        # Floor, not a lock: canvas is free to grow past this, but won't
+        # shrink below it. Below this size the QScrollArea scrolls instead.
+        canvas.setMinimumSize(self.MIN_CANVAS_WIDTH, self.MIN_CANVAS_HEIGHT)
+
         toolbar = NavigationToolbar2QT(canvas, self)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)  # <-- key: canvas fills viewport when room exists
+        scroll.setWidget(canvas)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
         layout.addWidget(toolbar)
-        layout.addWidget(canvas)
+        layout.addWidget(scroll, 1)
+
         canvas.draw_idle()
         self.canvas = canvas
         self.title = title
