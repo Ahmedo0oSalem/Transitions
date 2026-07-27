@@ -1,27 +1,22 @@
-import os
-import json
+﻿import json
 import bz2
+from pathlib import Path
 
-# ==========================
-# Configuration
-# ==========================
+from ..io.paths import (
+    PROCESSED_DIR,
+    RAW_EVENTS_DIR,
+    RAW_METADATA_DIR,
+    RAW_ROSTERS_DIR,
+    RAW_TRACKING_DIR,
+    find_match_file,
+    match_dir,
+)
 
-RAW_TRACKING_DIR = "Tracking_Data"
-RAW_METADATA_DIR = "Metadata"
-
-# ASSUMPTION: roster files live in a folder parallel to Metadata/Tracking_Data,
-# named the same way (<match_id>.json). Rename this if yours differs
-# (e.g. "Rosters", "Lineups", "Squads").
-RAW_ROSTERS_DIR = "Rosters"
-
-# Dedicated per-match event file, e.g. Event_Data/<match_id>.json -- the
-# PFF FC "Event Data Specification v2.5" format (game events + possession
-# events pre-merged, one row per possession event). Preferred over the
-# game_event_id/possession_event_id fields embedded in the raw tracking
-# frames -- see process_events() docstring for why.
-RAW_EVENTS_DIR = "Event_Data"
-
-OUTPUT_DIR = "Processed_Tracking"
+OUTPUT_DIR = str(PROCESSED_DIR)
+RAW_TRACKING_DIR = str(RAW_TRACKING_DIR)
+RAW_METADATA_DIR = str(RAW_METADATA_DIR)
+RAW_ROSTERS_DIR = str(RAW_ROSTERS_DIR)
+RAW_EVENTS_DIR = str(RAW_EVENTS_DIR)
 
 # Which tracking fields to keep
 TRACKING_FIELDS = [
@@ -79,12 +74,13 @@ def process_roster(match_id, home_team_id, away_team_id):
     PLAYER_ID_KEYS tries several). Keeping both lets the formation
     script match on whichever key the tracking data actually uses.
     """
-    input_path = os.path.join(RAW_ROSTERS_DIR, f"{match_id}.json")
-
-    if not os.path.exists(input_path):
-        print(f"    !! Roster missing: {match_id} (looked in {input_path}). "
+    roster_path = find_match_file(RAW_ROSTERS_DIR, match_id, ".json")
+    if roster_path is None:
+        print(f"    !! Roster missing: {match_id} (looked in {RAW_ROSTERS_DIR}). "
               f"Formation detection will fall back to distance-based GK guessing.")
         return None
+
+    input_path = str(roster_path)
 
     with open(input_path, "r", encoding="utf-8") as f:
         roster = json.load(f)
@@ -148,11 +144,11 @@ def process_roster(match_id, home_team_id, away_team_id):
 # ==========================
 def process_metadata(match_id):
 
-    input_path = os.path.join(RAW_METADATA_DIR, f"{match_id}.json")
-
-    if not os.path.exists(input_path):
+    metadata_path = find_match_file(RAW_METADATA_DIR, match_id, ".json")
+    if metadata_path is None:
         print(f"Metadata missing: {match_id}")
         return
+    input_path = str(metadata_path)
 
     with open(input_path, "r", encoding="utf-8") as f:
         metadata = json.load(f)
@@ -219,16 +215,16 @@ def process_metadata(match_id):
     else:
         output["goalkeepers"] = {"home": None, "away": None}
 
-    output_folder = os.path.join(OUTPUT_DIR, str(match_id))
-    os.makedirs(output_folder, exist_ok=True)
+    output_folder = match_dir(match_id, OUTPUT_DIR)
+    output_folder.mkdir(parents=True, exist_ok=True)
 
-    output_path = os.path.join(output_folder, "metadata.json")
+    output_path = output_folder / "metadata.json"
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=4)
 
     if roster_data is not None:
-        roster_path = os.path.join(output_folder, "roster.json")
+        roster_path = output_folder / "roster.json"
         with open(roster_path, "w", encoding="utf-8") as f:
             json.dump(roster_data["players"], f, indent=4)
 
@@ -277,10 +273,10 @@ def process_events(match_id, periods_meta=None):
     continuously across the whole match. Check one second-half row
     before trusting it over the existing derivation.
     """
-    input_path = os.path.join(RAW_EVENTS_DIR, f"{match_id}.json")
-
-    if not os.path.exists(input_path):
+    event_path = find_match_file(RAW_EVENTS_DIR, match_id, ".json")
+    if event_path is None:
         return None
+    input_path = str(event_path)
 
     with open(input_path, "r", encoding="utf-8") as f:
         raw = json.load(f)
@@ -353,14 +349,14 @@ def process_events(match_id, periods_meta=None):
     # question flagged above.
     _add_period_elapsed_estimates(records, periods_meta)
 
-    output_folder = os.path.join(OUTPUT_DIR, str(match_id))
-    os.makedirs(output_folder, exist_ok=True)
-    events_path = os.path.join(output_folder, "events.json")
+    output_folder = match_dir(match_id, OUTPUT_DIR)
+    output_folder.mkdir(parents=True, exist_ok=True)
+    events_path = output_folder / "events.json"
     with open(events_path, "w", encoding="utf-8") as f:
         json.dump(records, f, indent=2)
 
     print(f"    wrote {len(records)} events ({skipped_non_events} flagged "
-          f"nonEvent) -> {events_path}  [source: Event_Data]")
+          f"nonEvent) -> {events_path}  [source: {RAW_EVENTS_DIR}]")
 
     return records
 
@@ -471,22 +467,16 @@ def process_tracking(match_id, periods_meta=None, extract_embedded_events=True):
     to avoid decompressing/parsing ~200k frames twice per match.
     """
 
-    input_path = os.path.join(
-        RAW_TRACKING_DIR,
-        f"{match_id}.jsonl.bz2"
-    )
-
-    if not os.path.exists(input_path):
+    tracking_path = find_match_file(RAW_TRACKING_DIR, match_id, ".jsonl.bz2")
+    if tracking_path is None:
         print(f"Tracking missing: {match_id}")
         return
+    input_path = str(tracking_path)
 
-    output_folder = os.path.join(OUTPUT_DIR, str(match_id))
-    os.makedirs(output_folder, exist_ok=True)
+    output_folder = match_dir(match_id, OUTPUT_DIR)
+    output_folder.mkdir(parents=True, exist_ok=True)
 
-    output_path = os.path.join(
-        output_folder,
-        "tracking.jsonl.bz2"
-    )
+    output_path = output_folder / "tracking.jsonl.bz2"
 
     events_by_id = {}
 
@@ -525,7 +515,7 @@ def process_tracking(match_id, periods_meta=None, extract_embedded_events=True):
         )
         _add_period_elapsed_estimates(events, periods_meta)
 
-        events_path = os.path.join(output_folder, "events.json")
+        events_path = output_folder / "events.json"
         with open(events_path, "w", encoding="utf-8") as f:
             json.dump(events, f, indent=2)
         print(f"    wrote {len(events)} events -> {events_path}")
@@ -535,35 +525,45 @@ def process_tracking(match_id, periods_meta=None, extract_embedded_events=True):
 # Main
 # ==========================
 
-def main():
+def main(match_id: str | None = None):
+    """Run preprocessing for one or all matches.
 
-    tracking_files = [
-        f for f in os.listdir(RAW_TRACKING_DIR)
-        if f.endswith(".jsonl.bz2")
-    ]
+    Args:
+        match_id: If given, process only this match. If None, process all.
+    """
 
-    print(f"Found {len(tracking_files)} matches.")
+    tracking_dir = Path(RAW_TRACKING_DIR)
+
+    if match_id is not None:
+        tracking_files = [
+            f for f in tracking_dir.iterdir()
+            if f.stem.split(".")[0] == match_id and f.suffixes == [".jsonl", ".bz2"]
+        ]
+        if not tracking_files:
+            print(f"Match {match_id} not found in {RAW_TRACKING_DIR}")
+            return
+    else:
+        tracking_files = [
+            f for f in tracking_dir.iterdir()
+            if f.suffixes == [".jsonl", ".bz2"]
+        ]
+
+    print(f"Found {len(tracking_files)} match(es).")
 
     for file in tracking_files:
 
-        match_id = os.path.splitext(
-            os.path.splitext(file)[0]
-        )[0]
+        mid = file.stem.split(".")[0]
 
-        print(f"Processing match {match_id}")
+        print(f"Processing match {mid}")
 
-        periods_meta = process_metadata(match_id)
+        periods_meta = process_metadata(mid)
 
-        # Prefer the dedicated Event_Data/<match_id>.json (real,
-        # provider-labeled possession events). Only fall back to
-        # scraping game_event/possession_event off the tracking frames
-        # if this match has no Event_Data file.
-        real_events = process_events(match_id, periods_meta)
+        real_events = process_events(mid, periods_meta)
         if real_events is None:
-            print(f"    no Event_Data/{match_id}.json -- falling back to "
+            print(f"    no {RAW_EVENTS_DIR}/{mid}.json -- falling back to "
                   f"embedded tracking-frame event extraction.")
 
-        process_tracking(match_id, periods_meta,
+        process_tracking(mid, periods_meta,
                           extract_embedded_events=(real_events is None))
 
     print("Done!")

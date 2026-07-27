@@ -1,4 +1,4 @@
-"""
+﻿"""
 visualize_match.py
 
 Interactive viewer for tracking data: shows both teams' player positions,
@@ -25,7 +25,6 @@ directly (same file, same folder) so the two tools always agree on field
 names, coordinate handling, and who the goalkeepers are.
 """
 
-import os
 import sys
 import bz2
 import json
@@ -34,52 +33,21 @@ import argparse
 import numpy as np
 import pandas as pd
 import matplotlib
-# matplotlib.use(backend) only RECORDS the preference -- it doesn't import
-# the backend module until the first plt.subplots()/pitch.draw() call. So
-# wrapping it in try/except doesn't actually catch an unavailable backend;
-# it always "succeeds" immediately and the real failure shows up later,
-# deep in a draw() call, which is confusing. Pick by platform instead:
-# MacOSX backend only exists (and is only worth using) on macOS.
-matplotlib.use("MacOSX" if sys.platform == "darwin" else "TkAgg")
+matplotlib.use("QtAgg" if "PyQt6" in sys.modules else ("MacOSX" if sys.platform == "darwin" else "TkAgg"))
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
 from mplsoccer import Pitch
 
-# Reuse detect_formations.py's config, coordinate handling, field-name
-# aliasing, and goalkeeper-identification logic so this visualizer is
-# always consistent with the formation-detection output. Must be in the
-# same folder as this script.
-import detect_formation as df_mod
+from ..analytics.formations import detector as df_mod
+from ..io.paths import match_dir
+from .theme import HOME_COLOR, AWAY_COLOR, BALL_COLOR, POSSESSION_RING_COLOR, FIG_FACE
 
-
-# ==========================
-# Config
-# ==========================
-
-HOME_COLOR = "#d62728"       # red
-AWAY_COLOR = "#1f77b4"       # blue
-BALL_COLOR = "#f7e017"
-POSSESSION_RING_COLOR = "#2ecc71"  # green ring around whoever "has" the ball
-
-# Max ball-to-player distance (in meters) to count as that player having
-# possession. This is a simple proximity heuristic -- your tracking data
-# doesn't include real possession events, so this is an approximation, not
-# ground truth (won't know about handballs, blocked shots, etc.)
 POSSESSION_THRESHOLD_M = 2.5
 
-OFF_SCREEN = -1000.0  # sentinel position used to "hide" missing points
+OFF_SCREEN = -1000.0
 
 
 def _extract_player_xy_lenient(player_dict):
-    """
-    Like detect_formations.extract_player_xy, but WITHOUT the
-    confidence/visibility quality filter. That filter is correct for
-    formation averaging (LOW-confidence points are noisy outliers that
-    should be excluded from an average), but wrong here: dropping ~60%+
-    of points per frame means most players would flicker in and out of
-    existence on screen. For a single-frame display, a LOW-confidence
-    point is still far more useful than no point at all.
-    """
     x = df_mod._get_first(player_dict, df_mod.PLAYER_X_KEYS)
     y = df_mod._get_first(player_dict, df_mod.PLAYER_Y_KEYS)
     pid = df_mod._get_first(player_dict, df_mod.PLAYER_ID_KEYS)
@@ -88,19 +56,15 @@ def _extract_player_xy_lenient(player_dict):
     return pid, float(x), float(y)
 
 
-# ==========================
-# Data loading
-# ==========================
-
 def load_match(match_id, processed_dir):
-    match_dir = os.path.join(processed_dir, str(match_id))
-    metadata_path = os.path.join(match_dir, "metadata.json")
-    tracking_path = os.path.join(match_dir, "tracking.jsonl.bz2")
-    formations_path = os.path.join(match_dir, "formations.csv")
+    match_dir_path = match_dir(match_id, processed_dir)
+    metadata_path = match_dir_path / "metadata.json"
+    tracking_path = match_dir_path / "tracking.jsonl.bz2"
+    formations_path = match_dir_path / "formations.csv"
 
-    if not os.path.exists(metadata_path) or not os.path.exists(tracking_path):
+    if not metadata_path.is_file() or not tracking_path.is_file():
         raise FileNotFoundError(
-            f"Missing metadata.json / tracking.jsonl.bz2 under {match_dir}. "
+            f"Missing metadata.json / tracking.jsonl.bz2 under {match_dir_path}. "
             f"Run preprocessing (and detect_formations.py, optionally) first."
         )
 
@@ -190,7 +154,7 @@ def load_match(match_id, processed_dir):
     goalkeepers = df_mod.resolve_goalkeepers(tracking_path, metadata)
 
     formations_df = None
-    if os.path.exists(formations_path):
+    if formations_path.is_file():
         formations_df = pd.read_csv(formations_path)
         print(f"Loaded {len(formations_df)} formation-window rows from formations.csv")
     else:
@@ -238,7 +202,7 @@ def get_formation_label(formations_df, team, period, elapsed_sec):
 # UI
 # ==========================
 
-def run_app(match_id, processed_dir, speed):
+def run_app(match_id, processed_dir, speed, show=True, block=True):
     data = load_match(match_id, processed_dir)
     metadata = data["metadata"]
     n_frames = len(data["periods"])
@@ -270,7 +234,7 @@ def run_app(match_id, processed_dir, speed):
                   for _ in data["away_ids"]]
 
     title_text = ax.set_title("", fontsize=11, color="white")
-    fig.patch.set_facecolor("#1b1b1b")
+    fig.patch.set_facecolor(FIG_FACE)
 
     def nearest_owner(frame_idx):
         bx, by = data["ball_xy"][frame_idx]
@@ -377,7 +341,13 @@ def run_app(match_id, processed_dir, speed):
     play_button.on_clicked(toggle_play)
 
     update(0)
-    plt.show()
+    fig._transitions_controls = (slider, play_button, timer)
+    if show:
+        plt.show(block=block)
+    return fig
+
+
+from ..io.paths import PROCESSED_DIR
 
 
 # ==========================
@@ -387,7 +357,7 @@ def run_app(match_id, processed_dir, speed):
 def main():
     parser = argparse.ArgumentParser(description="Interactive match tracking visualizer.")
     parser.add_argument("match_id")
-    parser.add_argument("--processed-dir", default="Processed_Tracking")
+    parser.add_argument("--processed-dir", default=str(PROCESSED_DIR))
     parser.add_argument("--speed", type=float, default=1.0,
                          help="Playback speed multiplier for Play mode (default 1.0).")
     args = parser.parse_args()

@@ -1,4 +1,4 @@
-"""
+﻿"""
 plot_formation_timeline.py
 
 Plots each team's detected formation over time as a colored "piano roll":
@@ -38,27 +38,28 @@ REQUIRES:
     possession.py and detect_formations.py in the same folder as this script.
 """
 
-import os
 import sys
 import json
 import argparse
 from collections import Counter
 
 import matplotlib
-matplotlib.use("MacOSX" if sys.platform == "darwin" else "TkAgg")
+matplotlib.use("QtAgg" if "PyQt6" in sys.modules else ("MacOSX" if sys.platform == "darwin" else "TkAgg"))
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import pandas as pd
 import numpy as np
 
-import possession as pos
+from ..analytics import possession as pos
+from ..io.paths import PROCESSED_DIR, match_dir
+from .theme import FIG_FACE, GRID, BASELINE, TEXT_PRIMARY, GOAL_COLOR
 
-PROCESSED_DIR_DEFAULT = "Processed_Tracking"
+PROCESSED_DIR_DEFAULT = str(PROCESSED_DIR)
 
-BG_COLOR = "#0d1b2a"
-GRID_COLOR = "#2a3a4a"
-BASELINE_COLOR = "#3a4a5a"
-TEXT_COLOR = "#e6e6e6"
+BG_COLOR = FIG_FACE
+GRID_COLOR = GRID
+BASELINE_COLOR = BASELINE
+TEXT_COLOR = TEXT_PRIMARY
 
 # Distinct, consistent color per formation (same formation = same color in
 # both teams' panels). tab20 + tab20b gives 40 distinguishable colors,
@@ -68,17 +69,17 @@ _PALETTE = [matplotlib.colors.to_hex(c) for c in
 
 
 def load_data(match_id, processed_dir):
-    folder = os.path.join(processed_dir, str(match_id))
-    formations_path = os.path.join(folder, "formations.csv")
-    metadata_path = os.path.join(folder, "metadata.json")
-    tracking_path = os.path.join(folder, "tracking.jsonl.bz2")
+    folder = match_dir(match_id, processed_dir)
+    formations_path = folder / "formations.csv"
+    metadata_path = folder / "metadata.json"
+    tracking_path = folder / "tracking.jsonl.bz2"
 
-    if not os.path.exists(formations_path):
+    if not formations_path.is_file():
         raise FileNotFoundError(
             f"{formations_path} not found -- run detect_formations.py for "
             f"match {match_id} first."
         )
-    if not os.path.exists(tracking_path):
+    if not tracking_path.is_file():
         raise FileNotFoundError(
             f"{tracking_path} not found -- possession sequences are derived "
             f"directly from the tracking file."
@@ -328,7 +329,7 @@ def draw_period_dividers(ax_top, ax_bottom, boundaries):
                 ha="right", va="bottom", fontsize=8, color=TEXT_COLOR)
 
 
-GOAL_COLOR = "#f1c40f"  # gold, distinct from both team/formation colors and grid lines
+
 
 
 def draw_goals(ax_home, ax_away, goals, offsets):

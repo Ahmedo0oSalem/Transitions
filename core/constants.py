@@ -1,0 +1,11 @@
+"""Project-wide constants used by the modular package."""
+
+DEFAULT_DATA_DIR = "data"
+DEFAULT_RAW_METADATA_DIR = f"{DEFAULT_DATA_DIR}/meta_data"
+DEFAULT_RAW_TRACKING_DIR = f"{DEFAULT_DATA_DIR}/tracking_data"
+DEFAULT_RAW_EVENTS_DIR = f"{DEFAULT_DATA_DIR}/event_data"
+DEFAULT_RAW_ROSTERS_DIR = f"{DEFAULT_DATA_DIR}/rosters"
+DEFAULT_PROCESSED_DIR = f"{DEFAULT_DATA_DIR}/processed_tracking"
+DEFAULT_RESOURCE_DIR = f"{DEFAULT_DATA_DIR}/resources"
+DEFAULT_PLAYERS_CSV = f"{DEFAULT_DATA_DIR}/players.csv"
+DEFAULT_COMPETITIONS_CSV = f"{DEFAULT_DATA_DIR}/competitions.csv"
