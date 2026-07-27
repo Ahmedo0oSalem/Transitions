@@ -78,6 +78,25 @@ def process_match(match_id, processed_dir=PROCESSED_DIR, window_seconds=None, st
     goalkeepers = resolve_goalkeepers(tracking_path, metadata)
     logger.info("[%s] goalkeepers: %s", match_id, goalkeepers)
 
+    # ---- Weighted confidence support (optional) ----
+    events_path = match_dir_path / "events.json"
+    events = None
+    if events_path.is_file():
+        with open(events_path, "r", encoding="utf-8") as f:
+            events = json.load(f)
+        logger.info("[%s] loaded %s events", match_id, len(events))
+
+    weight_lookup = None
+    if events is not None:
+        from .frame_reliability import compute_frame_weights, MIN_WINDOW_CONFIDENCE as _MIN_CONF
+
+        logger.info("[%s] computing per-frame reliability weights...", match_id)
+        weight_lookup = compute_frame_weights(
+            tracking_path, metadata, events=events, goalkeepers=goalkeepers,
+        )
+    else:
+        _MIN_CONF = 0.0  # no confidence filter when no events exist
+
     logger.info("[%s] accumulating positions into %ss windows (stride %ss)...", match_id, w_sec, s_sec)
     buckets = accumulate_positions(
         tracking_path,
@@ -86,6 +105,7 @@ def process_match(match_id, processed_dir=PROCESSED_DIR, window_seconds=None, st
         pitch_width,
         stride_seconds=s_sec,
         window_seconds=w_sec,
+        weight_lookup=weight_lookup,
     )
 
     rows = []
@@ -94,10 +114,21 @@ def process_match(match_id, processed_dir=PROCESSED_DIR, window_seconds=None, st
         if n_frames < FORMATION_MIN_FRAMES_PER_WINDOW:
             continue
 
+        # Weighted averaging (each entry is (x, y, w))
         avg_xy = []
-        for pid, coords in players.items():
-            arr = np.array(coords, dtype=float)
-            avg_xy.append(arr.mean(axis=0))
+        window_weight_sum = 0.0
+        for pid, triples in players.items():
+            arr = np.array(triples, dtype=float)
+            w_sum = arr[:, 2].sum()
+            if w_sum <= 0:
+                continue
+            wx = (arr[:, 0] * arr[:, 2]).sum() / w_sum
+            wy = (arr[:, 1] * arr[:, 2]).sum() / w_sum
+            avg_xy.append((wx, wy))
+            window_weight_sum += w_sum
+
+        if not avg_xy:
+            continue
         avg_xy = np.array(avg_xy)
 
         if avg_xy.shape[0] < FORMATION_MIN_OUTFIELD_PLAYERS:
@@ -105,6 +136,18 @@ def process_match(match_id, processed_dir=PROCESSED_DIR, window_seconds=None, st
 
         orientation = get_orientation(team, period, home_team_start_left)
         formation, cost, _assigned_names = match_formation(avg_xy, templates, orientation)
+
+        # Confidence = total weight sum * fit quality
+        fit_quality = 1.0 / (1.0 + float(cost))
+        confidence = window_weight_sum * fit_quality
+
+        if events is not None and confidence < _MIN_CONF:
+            logger.debug(
+                "[%s] dropping window (team=%s, period=%s, idx=%s): "
+                "confidence %.4f < %.4f",
+                match_id, team, period, window_index, confidence, _MIN_CONF,
+            )
+            continue
 
         window_start = window_index * s_sec
         window_end = window_start + w_sec
@@ -121,6 +164,7 @@ def process_match(match_id, processed_dir=PROCESSED_DIR, window_seconds=None, st
             "formation": formation,
             "orientation": orientation,
             "avgCostPerPlayer": round(float(cost), 3),
+            "confidence": round(float(confidence), 4),
         })
 
     out_df = pd.DataFrame(rows).sort_values(["team", "period", "windowIndex"])

@@ -3,19 +3,10 @@ plot_formation_timeline.py
 
 Plots each team's detected formation over time as a colored "piano roll":
 one row per formation, colored horizontal bars showing when that
-formation was detected -- one bar per POSSESSION SEQUENCE (not per raw
-sliding-window row).
-
-CHANGE FROM THE PREVIOUS VERSION: bars now correspond to possession
-sequences (via possession.py's proximity-based "who has the ball"
-heuristic, run-length encoded and flicker-smoothed) rather than raw,
-overlapping formations.csv rows. For each possession sequence, we look
-up whichever formations.csv window was "current" at that sequence's
-midpoint and use that as the sequence's formation label. This is closer
-to "what shape was this team in during this spell of play" than the
-previous raw/overlapping view, at the cost of depending on the
-possession heuristic (see possession.py's caveat: no real possession
-events exist in this data, so treat sequence boundaries as approximate).
+formation was detected -- one bar per CONTIGUOUS WINDOW RUN where the
+window-level formation matches the PERIOD-LEVEL voted formation (the
+label with the highest cumulative confidence across all windows in that
+period). This replaces the previous possession-sequence approach.
 
 ALSO: goal markers, if Processed_Tracking/<match_id>/events.json exists
 (written by preprocessing.py's process_events() from Event_Data/, see
@@ -31,24 +22,21 @@ USAGE:
 REQUIRES:
     Processed_Tracking/<match_id>/formations.csv       (from detect_formations.py)
     Processed_Tracking/<match_id>/metadata.json
-    Processed_Tracking/<match_id>/tracking.jsonl.bz2   (possession sequences are
-                                                         derived directly from this)
+    Processed_Tracking/<match_id>/tracking.jsonl.bz2
     Processed_Tracking/<match_id>/events.json          (optional -- enables goal
-                                                         markers if present)
-    possession.py and detect_formations.py in the same folder as this script.
+                                                          markers if present)
 """
 
 import sys
 import json
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
 
 import matplotlib
 matplotlib.use("QtAgg" if "PyQt6" in sys.modules else ("MacOSX" if sys.platform == "darwin" else "TkAgg"))
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import pandas as pd
-import numpy as np
 
 from ..analytics import possession as pos
 from ..io.paths import PROCESSED_DIR, match_dir
@@ -61,9 +49,6 @@ GRID_COLOR = GRID
 BASELINE_COLOR = BASELINE
 TEXT_COLOR = TEXT_PRIMARY
 
-# Distinct, consistent color per formation (same formation = same color in
-# both teams' panels). tab20 + tab20b gives 40 distinguishable colors,
-# comfortably more than any match should realistically produce.
 _PALETTE = [matplotlib.colors.to_hex(c) for c in
             list(plt.get_cmap("tab20").colors) + list(plt.get_cmap("tab20b").colors)]
 
@@ -80,14 +65,13 @@ def load_data(match_id, processed_dir):
             f"match {match_id} first."
         )
     if not tracking_path.is_file():
-        raise FileNotFoundError(
-            f"{tracking_path} not found -- possession sequences are derived "
-            f"directly from the tracking file."
-        )
+        raise FileNotFoundError(f"{tracking_path} not found.")
 
     formations_df = pd.read_csv(formations_path)
     formations_df = formations_df[formations_df["matchId"] == int(match_id)].copy()
     formations_df = formations_df.dropna(subset=["formation"])
+    if "confidence" not in formations_df.columns:
+        formations_df["confidence"] = 1.0
 
     with open(metadata_path, "r", encoding="utf-8") as f:
         metadata = json.load(f)
@@ -99,28 +83,6 @@ def load_data(match_id, processed_dir):
     return formations_df, metadata, home_name, away_name, tracking_path, folder
 
 
-def build_possession_sequences(tracking_path, metadata):
-    pitch_length = metadata["pitch"]["length"]
-    pitch_width = metadata["pitch"]["width"]
-
-    print("Deriving possession sequences from tracking data...")
-    periods, elapsed, ball_x, ball_y, owner = pos.stream_ball_and_owner(
-        tracking_path, pitch_length, pitch_width)
-    fps = pos.infer_fps(elapsed, periods)
-    smoothed = pos.smooth_owner(owner, periods, fps)
-    sequences = pos.detect_possession_sequences(smoothed, periods, elapsed, fps)
-    print(f"  -> {len(sequences)} possession sequences "
-          f"({sum(1 for s in sequences if s['team'])} with a clear team, "
-          f"{sum(1 for s in sequences if not s['team'])} loose-ball/no-owner)")
-    return sequences
-
-
-# Outcome fields that mark a possession event as an inadvertent shot into
-# the ACTING player's own net -- per the PFF FC spec, a deliberate shot
-# ("SH") is never an own goal (that scenario doesn't exist in the
-# taxonomy), only a clearance/touch/rebound that inadvertently beats the
-# keeper. Mapping: possessionEventType -> the outcome field that carries
-# the "D - Inadvertent Shot at own Goal" value for that type.
 _OWN_GOAL_OUTCOME_FIELD = {
     "CL": "clearanceOutcomeType",
     "TC": "touchOutcomeType",
@@ -129,30 +91,6 @@ _OWN_GOAL_OUTCOME_FIELD = {
 
 
 def find_goals(events):
-    """
-    Scans events.json for goals. A goal is any possession event whose
-    shotOutcomeType == "G" -- per the spec, this field is populated
-    both for deliberate shots (possessionEventType "SH") AND for any
-    other event that inadvertently results in a shot at goal (clearance,
-    touch, rebound), so filtering on shotOutcomeType alone catches both
-    without needing to special-case possessionEventType == "SH".
-
-    Own goals need the SCORING team flipped relative to the ACTING
-    team: gameEvents.homeTeam / teamId identify whoever performed the
-    action (cleared/touched/deflected the ball), but for an own goal
-    the goal counts for the opposing team. Detected via
-    _OWN_GOAL_OUTCOME_FIELD -- see its comment above. ASSUMPTION:
-    only verified against the spec text, not against a real own-goal
-    row (I haven't seen one) -- worth checking against a match you know
-    had an own goal before trusting the "(OG)" labeling specifically;
-    the "a goal happened at this time" part is solid either way since
-    it only depends on shotOutcomeType == "G".
-
-    Returns a list of {period, sec, team ('home'/'away'), scorer,
-    ownGoal} dicts, sorted by time. `sec` is periodElapsedTimeEstimate
-    (added by preprocessing.py) -- events with no time estimate are
-    skipped, since they can't be placed on the timeline.
-    """
     goals = []
     for ev in events:
         if ev.get("nonEvent"):
@@ -186,19 +124,66 @@ def find_goals(events):
     return goals
 
 
-def lookup_formation(formations_df, team, period, sec):
-    """Formation label whichever formations.csv window is 'current' at
-    time `sec` into `period` (freshest-starting overlapping window, same
-    logic as detect_formations/visualize_match use elsewhere)."""
-    sub = formations_df[
-        (formations_df["team"] == team)
-        & (formations_df["period"] == period)
-        & (formations_df["windowStartSec"] <= sec)
-        & (sec < formations_df["windowEndSec"])
-    ]
-    if sub.empty:
-        return None
-    return sub.loc[sub["windowStartSec"].idxmax(), "formation"]
+def _strip_flipped(formation):
+    if formation and formation.endswith("_flipped"):
+        return formation[:-8]
+    return formation
+
+
+def resolve_formation_by_vote(df):
+    """For each (team, period), pick the formation with the highest
+    cumulative confidence (*base* name only -- flipped/original are
+    grouped together). Returns ``{(team, period): base_formation}``."""
+    groups = df.groupby(["team", "period"], sort=False)
+    voted = {}
+    for (team, period), grp in groups:
+        by_base = defaultdict(float)
+        for _, row in grp.iterrows():
+            base = _strip_flipped(row["formation"])
+            by_base[base] += row["confidence"]
+        winner = max(by_base, key=by_base.get)
+        voted[(team, period)] = winner
+    return voted
+
+
+def formation_runs_from_votes(df, voted, offsets):
+    """Build continuous-time bar dicts from window-level formation data.
+
+    For each (team, period), scan windows sorted by ``windowStartSec``.
+    Whenever ``_strip_flipped(formation) == voted[(team, period)]``,
+    extend the current run or start a new one. Runs that differ from the
+    voted formation are skipped. Each run produces a bar spanning from
+    the first window's start to the last window's end (in continuous
+    match time via *offsets*).
+
+    Returns a list of ``{team, formation, matchStart, matchEnd}`` dicts.
+    """
+    sorted_df = df.sort_values(["team", "period", "windowStartSec"])
+    bars = []
+    for (team, period), grp in sorted_df.groupby(["team", "period"], sort=False):
+        winner = voted.get((team, period))
+        if winner is None:
+            continue
+        off = offsets.get(period, 0.0)
+        run_start = None
+        run_end = None
+        for _, row in grp.iterrows():
+            base = _strip_flipped(row["formation"])
+            if base == winner:
+                ws = row["windowStartSec"] + off
+                we = row["windowEndSec"] + off
+                if run_start is None:
+                    run_start = ws
+                run_end = we
+            else:
+                if run_start is not None:
+                    bars.append({"team": team, "formation": winner,
+                                 "matchStart": run_start, "matchEnd": run_end})
+                    run_start = None
+        if run_start is not None:
+            bars.append({"team": team, "formation": winner,
+                         "matchStart": run_start, "matchEnd": run_end})
+    return bars
 
 
 def infer_stride_seconds(df):
@@ -210,9 +195,6 @@ def infer_stride_seconds(df):
 
 
 def compute_period_offsets(df, metadata=None):
-    """Concatenates periods onto one continuous match-time axis. Prefers
-    metadata's period start/end timestamps (exact); falls back to the
-    formations.csv window grid only if metadata is missing a period."""
     stride = infer_stride_seconds(df)
     periods = sorted(df["period"].unique())
     meta_periods = (metadata or {}).get("periods", {}) or {}
@@ -256,29 +238,6 @@ def build_xticks(total_duration, window_seconds):
     return cleaned
 
 
-def sequences_to_bars(sequences, team, formations_df, offsets):
-    """Attaches a formation label to each of `team`'s possession
-    sequences and converts sequence time -> continuous match time.
-    Drops sequences with no resolvable formation (e.g. before the first
-    formations.csv window starts)."""
-    bars = []
-    for s in sequences:
-        if s["team"] != team:
-            continue
-        mid = (s["start_sec"] + s["end_sec"]) / 2
-        formation = lookup_formation(formations_df, team, s["period"], mid)
-        if formation is None:
-            continue
-        off = offsets.get(s["period"], 0.0)
-        bars.append({
-            "formation": formation,
-            "matchStart": s["start_sec"] + off,
-            "matchEnd": s["end_sec"] + off,
-            "duration": s["duration"],
-        })
-    return bars
-
-
 def draw_team_panel(ax, bars, color_of, total_duration):
     if not bars:
         ax.text(0.5, 0.5, "no data", ha="center", va="center",
@@ -288,7 +247,7 @@ def draw_team_panel(ax, bars, color_of, total_duration):
 
     duration_by_formation = Counter()
     for b in bars:
-        duration_by_formation[b["formation"]] += b["duration"]
+        duration_by_formation[b["formation"]] += b["matchEnd"] - b["matchStart"]
     order_desc = [f for f, _ in duration_by_formation.most_common()]
     n = len(order_desc)
     y_of = {f: n - 1 - i for i, f in enumerate(order_desc)}
@@ -329,18 +288,7 @@ def draw_period_dividers(ax_top, ax_bottom, boundaries):
                 ha="right", va="bottom", fontsize=8, color=TEXT_COLOR)
 
 
-
-
-
 def draw_goals(ax_home, ax_away, goals, offsets):
-    """
-    Marks each goal with a full-height gold line on both panels (so
-    it's visible against whichever formation bar it interrupts) plus a
-    "MM' Scorer" label on the SCORING team's own panel -- own goals are
-    labeled on the panel of the team that benefits from the goal, not
-    the team whose player put it in their own net, since that's the
-    team the goal actually counts for.
-    """
     for g in goals:
         off = offsets.get(g["period"], 0.0)
         t = g["sec"] + off
@@ -368,7 +316,11 @@ def plot_formation_timeline(match_id, processed_dir=PROCESSED_DIR_DEFAULT):
     offsets, boundaries, total_duration = compute_period_offsets(formations_df, metadata)
     total_duration = max(total_duration, 1.0)
 
-    sequences = build_possession_sequences(tracking_path, metadata)
+    voted = resolve_formation_by_vote(formations_df)
+    all_bars = formation_runs_from_votes(formations_df, voted, offsets)
+
+    home_bars = [b for b in all_bars if b["team"] == "home"]
+    away_bars = [b for b in all_bars if b["team"] == "away"]
 
     events = pos.load_events(match_dir)
     if events is not None:
@@ -378,9 +330,6 @@ def plot_formation_timeline(match_id, processed_dir=PROCESSED_DIR_DEFAULT):
         goals = []
         print("  no events.json for this match -- skipping goal markers "
               "(goal detection requires real event data, not the proximity proxy).")
-
-    home_bars = sequences_to_bars(sequences, "home", formations_df, offsets)
-    away_bars = sequences_to_bars(sequences, "away", formations_df, offsets)
 
     all_formations = sorted({b["formation"] for b in home_bars + away_bars})
     color_of = {f: _PALETTE[i % len(_PALETTE)] for i, f in enumerate(all_formations)}
@@ -409,14 +358,14 @@ def plot_formation_timeline(match_id, processed_dir=PROCESSED_DIR_DEFAULT):
         label.set_ha("right")
     ax_away.set_xlim(0, total_duration)
 
-    # Shared legend: one entry per formation, colored to match its bars.
-    handles = [plt.Line2D([0], [0], color=color_of[f], linewidth=6, label=f) for f in all_formations]
+    handles = [plt.Line2D([0], [0], color=color_of[f], linewidth=6, label=f)
+               for f in all_formations]
     fig.legend(handles=handles, loc="lower center", ncol=min(len(all_formations), 10),
                frameon=False, labelcolor=TEXT_COLOR, bbox_to_anchor=(0.5, -0.02))
 
     fig.suptitle(
         f"Match {match_id} \u2014 Formation Timeline\n"
-        f"Each bar = one possession sequence  |  Dashed lines = period boundaries"
+        f"Each bar = contiguous window run of the voted formation"
         + ("  |  \u26bd = goal" if goals else ""),
         fontsize=13, color=TEXT_COLOR
     )
@@ -426,7 +375,7 @@ def plot_formation_timeline(match_id, processed_dir=PROCESSED_DIR_DEFAULT):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Plot each team's detected formation over time, one bar per possession sequence."
+        description="Plot each team's detected formation over time, one bar per voted window run."
     )
     parser.add_argument("match_id")
     parser.add_argument("--processed-dir", default=PROCESSED_DIR_DEFAULT)

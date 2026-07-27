@@ -8,39 +8,20 @@ from collections import defaultdict
 
 from ...core.config import FORMATION_GK_MIN_FRAMES
 from ...core.logger import get_logger
-from ...io.field_keys import (
+
+from .tracking_fields import (
     PLAYER_ID_KEYS,
     PLAYER_NUMBER_KEYS,
     PLAYER_X_KEYS,
     PLAYER_Y_KEYS,
+    REJECT_CONFIDENCE_VALUES,
+    REJECT_VISIBILITY_VALUES,
+    _get_first,
+    extract_player_xy,
 )
 
-REJECT_CONFIDENCE_VALUES = ["LOW"]
-REJECT_VISIBILITY_VALUES = []
 GK_MIN_FRAMES = FORMATION_GK_MIN_FRAMES
 logger = get_logger(__name__)
-
-
-def _get_first(d, keys, default=None):
-	for k in keys:
-		if k in d:
-			return d[k]
-	return default
-
-
-def extract_player_xy(player_dict):
-	"""Extract a player identifier and coordinates from a frame entry."""
-
-	if REJECT_CONFIDENCE_VALUES and player_dict.get("confidence") in REJECT_CONFIDENCE_VALUES:
-		return None
-	if REJECT_VISIBILITY_VALUES and player_dict.get("visibility") in REJECT_VISIBILITY_VALUES:
-		return None
-	x = _get_first(player_dict, PLAYER_X_KEYS)
-	y = _get_first(player_dict, PLAYER_Y_KEYS)
-	pid = _get_first(player_dict, PLAYER_ID_KEYS)
-	if x is None or y is None or pid is None:
-		return None
-	return pid, float(x), float(y)
 
 
 def goalkeepers_from_metadata(metadata):
