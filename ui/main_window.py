@@ -1,4 +1,4 @@
-"""PyQt6 main window for the TRANSITIONS app — sidebar nav + glassmorphism dark theme."""
+"""PyQt6 main window for the TRANSITIONS app — accordion sidebar + full-width plot area."""
 
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -28,8 +27,6 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QSplitter,
-    QStackedWidget,
     QTabWidget,
     QTextEdit,
     QToolButton,
@@ -46,7 +43,7 @@ from .theme import GlassCard, apply_glass_shadow, wrap_in_glass
 
 
 # ====================================================================
-# Helpers — unchanged from the original layout
+# Helpers
 # ====================================================================
 
 class _SignalWriter(io.TextIOBase):
@@ -114,8 +111,6 @@ class FigureTab(QWidget):
     plot becoming unreadable.
     """
 
-    # Tune these to taste — this is the floor below which we scroll
-    # instead of shrinking further.
     MIN_CANVAS_WIDTH = 480
     MIN_CANVAS_HEIGHT = 320
 
@@ -132,14 +127,12 @@ class FigureTab(QWidget):
         canvas.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        # Floor, not a lock: canvas is free to grow past this, but won't
-        # shrink below it. Below this size the QScrollArea scrolls instead.
         canvas.setMinimumSize(self.MIN_CANVAS_WIDTH, self.MIN_CANVAS_HEIGHT)
 
         toolbar = NavigationToolbar2QT(canvas, self)
 
         scroll = QScrollArea()
-        scroll.setWidgetResizable(True)  # <-- key: canvas fills viewport when room exists
+        scroll.setWidgetResizable(True)
         scroll.setWidget(canvas)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -153,27 +146,127 @@ class FigureTab(QWidget):
 
 
 # ====================================================================
-# Navigation Sidebar
+# Accordion Sidebar
 # ====================================================================
 
-class NavSidebar(QListWidget):
-    PAGE_LABELS = [
-        "🏠  Home",
-        "⚙️  Preprocess",
-        "🧩  Formations",
-        "📈  EPV + DAS",
-        "🕒  Timeline",
-        "🎬  Viewer",
-        "🚀  Pipeline",
+class AccordionSidebar(QWidget):
+    """Collapsible sidebar: each nav item has a header button and a
+    hidden drawer (description + run button). Only one drawer is open
+    at a time.
+    """
+
+    SECTIONS: list[tuple[str, str, str]] = [
+        ("Home",              "Run the full pipeline, or execute individual steps below.", "▸ Run Full Pipeline"),
+        ("Preprocess",        "Process raw tracking data into structured JSONL + metadata.", "▸ Run Preprocess"),
+        ("Formations",        "Detect team formations from player positions using template matching.", "▸ Detect Formations"),
+        ("EPV + DAS",        "Compute Expected Possession Value and Dangerous Action Sequences.", "▸ Run EPV + DAS"),
+        ("Timeline",          "Plot formation changes over the match.", "▸ Show Timeline"),
+        ("Viewer",            "Interactive match viewer with scrubbable slider and playback controls.", "▸ Open Match Viewer"),
     ]
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, callbacks: list[Callable[[], None]], parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedWidth(180)
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        for label in self.PAGE_LABELS:
-            self.addItem(label)
-        self.setCurrentRow(0)
+        self.setFixedWidth(200)
+        self._callbacks = callbacks
+        self._sections: list[dict] = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # -- App title --
+        title = QLabel("TRANSITIONS")
+        title.setStyleSheet(
+            "font-size: 16px; font-weight: 800; padding: 16px 14px 10px 14px;"
+            "color: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
+            " stop:0 #6cb2ff, stop:1 #9689ff);"
+            "background: transparent;"
+        )
+        layout.addWidget(title)
+
+        # -- Separator --
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: rgba(255,255,255,0.08); margin: 0 10px;")
+        layout.addWidget(sep)
+
+        for idx, (label, desc, btn_text) in enumerate(self.SECTIONS):
+            header, body = self._build_section(label, desc, btn_text, idx)
+            layout.addWidget(header)
+            layout.addWidget(body)
+            self._sections.append({
+                "header": header,
+                "body": body,
+                "is_open": False,
+            })
+
+        layout.addStretch()
+
+    # ---- section building ----
+
+    def _build_section(self, label: str, desc: str,
+                       btn_text: str, idx: int) -> tuple[QPushButton, QWidget]:
+        header = QPushButton(label)
+        header.setObjectName("navHeader")
+        header.setCursor(Qt.CursorShape.PointingHandCursor)
+        header.setStyleSheet("""
+            QPushButton#navHeader {
+                text-align: left;
+                padding: 9px 14px;
+                border: none;
+                border-radius: 0;
+                font-size: 13px;
+                font-weight: 600;
+                color: #b0c0d0;
+                background: transparent;
+            }
+            QPushButton#navHeader:hover {
+                background: rgba(255, 255, 255, 0.06);
+                color: #d0e0f0;
+            }
+        """)
+        header.clicked.connect(lambda: self._toggle(idx))
+
+        body = QWidget()
+        body.setVisible(False)
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(14, 2, 14, 10)
+        body_layout.setSpacing(8)
+
+        desc_label = QLabel(desc)
+        desc_label.setWordWrap(True)
+        desc_label.setStyleSheet(
+            "color: #7a8a9a; font-size: 11px; background: transparent;"
+        )
+
+        run_btn = QPushButton(btn_text)
+        run_btn.setObjectName("runButton")
+        run_btn.setMinimumHeight(32)
+        run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        run_btn.clicked.connect(self._callbacks[idx])
+
+        body_layout.addWidget(desc_label)
+        body_layout.addWidget(run_btn)
+
+        return header, body
+
+    def _toggle(self, idx: int) -> None:
+        target = self._sections[idx]
+        target["is_open"] = not target["is_open"]
+        target["body"].setVisible(target["is_open"])
+
+        # Close all other sections
+        for i, sec in enumerate(self._sections):
+            if i != idx and sec["is_open"]:
+                sec["is_open"] = False
+                sec["body"].setVisible(False)
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable or disable all interactive elements."""
+        for sec in self._sections:
+            sec["header"].setEnabled(enabled)
+            for child in sec["body"].findChildren(QPushButton):
+                child.setEnabled(enabled)
 
 
 # ====================================================================
@@ -379,7 +472,6 @@ class LogPanel(QWidget):
     def append(self, text: str) -> None:
         if not text:
             return
-        # HTML-escape and colourise
         escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         if text.startswith(">"):
             colour = "#4a9eff"
@@ -403,7 +495,6 @@ class LogPanel(QWidget):
         self.log.ensureCursorVisible()
 
     def update_progress(self, value: int, message: str) -> None:
-        """value: -1 for indeterminate, 0-100 for determinate."""
         if value < 0:
             self.progress.setRange(0, 0)
             self.progress.setFormat(message or "Running...")
@@ -442,16 +533,23 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # ---- Left sidebar ----
-        self.nav = NavSidebar()
-        main_layout.addWidget(self.nav)
+        # ---- Left accordion sidebar ----
+        self.sidebar = AccordionSidebar(callbacks=[
+            self.run_full_pipeline,
+            self.run_preprocess,
+            self.run_formations,
+            self.run_epv,
+            self.run_timeline,
+            self.run_viewer,
+        ])
+        main_layout.addWidget(self.sidebar)
 
         # ---- Vertical separator ----
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
         main_layout.addWidget(sep)
 
-        # ---- Right content area ----
+        # ---- Right content area (maximised for plots) ----
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(14, 14, 14, 10)
@@ -461,12 +559,7 @@ class MainWindow(QMainWindow):
         self.top = TopBar()
         content_layout.addWidget(wrap_in_glass(self.top, outer_margins=0))
 
-        # Stacked widget (one page per sidebar item)
-        self.stack = QStackedWidget()
-        self._build_pages()
-        content_layout.addWidget(self.stack, 0)
-
-        # Results tabs, wrapped in a glass card
+        # Results tabs (plots) — takes all remaining space
         self.tabs = QTabWidget()
         self.tabs.addTab(self._empty_tab(), "Results")
         tabs_card = wrap_in_glass(self.tabs, outer_margins=0)
@@ -480,185 +573,12 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("Ready")
 
-        # Wire sidebar to stacked widget
-        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
-
         # Track match ID in status bar
         self._match_label = QLabel("")
         self._match_label.setObjectName("statusMatch")
         self.statusBar().addPermanentWidget(self._match_label)
         self.top.match_combo.currentTextChanged.connect(self._update_match_status)
         self._update_match_status(self.top.match_id)
-
-    # ---- page builders ----
-
-    def _build_pages(self) -> None:
-        pages = [
-            self._build_home_page(),
-            self._build_page(
-                "Preprocess",
-                "Process raw tracking data into structured JSONL + metadata.",
-                "▸ Run Preprocess",
-                self.run_preprocess,
-            ),
-            self._build_page(
-                "Formations",
-                "Detect team formations from player positions using template matching.",
-                "▸ Detect Formations",
-                self.run_formations,
-            ),
-            self._build_page(
-                "EPV + DAS",
-                "Compute Expected Possession Value and Dangerous Action Sequences.",
-                "▸ Run EPV + DAS",
-                self.run_epv,
-            ),
-            self._build_page(
-                "Timeline",
-                "Plot formation changes over the match, one bar per possession sequence.",
-                "▸ Show Timeline",
-                self.run_timeline,
-            ),
-            self._build_page(
-                "Viewer",
-                "Interactive match viewer with scrubbable slider and playback controls.",
-                "▸ Open Match Viewer",
-                self.run_viewer,
-            ),
-            self._build_pipeline_page(),
-        ]
-        for page in pages:
-            self.stack.addWidget(page)
-
-    def _build_page(self, title: str, description: str,
-                    button_text: str, callback: Callable) -> QWidget:
-        card = GlassCard(margins=(20, 18, 20, 18), spacing=10)
-        layout = card.body
-
-        title_label = QLabel(title)
-        title_label.setStyleSheet(
-            "font-size: 19px; font-weight: 700; background: transparent;"
-        )
-        desc_label = QLabel(description)
-        desc_label.setWordWrap(True)
-        desc_label.setStyleSheet(
-            "color: #8a9aaa; font-size: 12.5px; background: transparent;"
-        )
-
-        btn = QPushButton(button_text)
-        btn.setObjectName("runButton")
-        btn.setMinimumHeight(38)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.clicked.connect(callback)
-
-        layout.addWidget(title_label)
-        layout.addWidget(desc_label)
-        layout.addSpacing(6)
-        layout.addWidget(btn)
-        layout.addStretch()
-
-        # give the shadow room to breathe
-        outer = QWidget()
-        outer_layout = QVBoxLayout(outer)
-        outer_layout.setContentsMargins(4, 4, 4, 4)
-        outer_layout.addWidget(card)
-        return outer
-
-    def _build_home_page(self) -> QWidget:
-        card = GlassCard(margins=(28, 26, 28, 26), spacing=6)
-        layout = card.body
-
-        title = QLabel("TRANSITIONS")
-        title.setStyleSheet(
-            "font-size: 30px; font-weight: 800; background: transparent;"
-            "color: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
-            " stop:0 #6cb2ff, stop:1 #9689ff);"
-        )
-        subtitle = QLabel("Football Analytics Framework")
-        subtitle.setStyleSheet(
-            "font-size: 14px; color: #8a9aaa; background: transparent;"
-        )
-
-        steps = QLabel(
-            "Workflow:\n"
-            "  1. Enter a match ID and paths in the top bar\n"
-            "  2. Run Preprocess to prepare the data\n"
-            "  3. Detect Formations to identify team shapes\n"
-            "  4. Run EPV + DAS for expected-value analysis\n"
-            "  5. Show Timeline or Open Match Viewer to explore results\n\n"
-            "Or click Run Full Pipeline to execute all steps at once."
-        )
-        steps.setWordWrap(True)
-        steps.setStyleSheet(
-            "color: #b0c0d0; font-size: 12.5px; margin-top: 10px;"
-            "background: transparent; line-height: 150%;"
-        )
-
-        quick_btn = QPushButton("▸ Run Full Pipeline")
-        quick_btn.setObjectName("runButton")
-        quick_btn.setMinimumHeight(42)
-        quick_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        quick_btn.clicked.connect(self.run_full_pipeline)
-
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
-        layout.addSpacing(10)
-        layout.addWidget(steps)
-        layout.addSpacing(14)
-        layout.addWidget(quick_btn)
-        layout.addStretch()
-
-        try:
-            from importlib.metadata import version
-            ver = version("TRANSITIONS")
-        except Exception:
-            ver = "0.1.0"
-        ver_label = QLabel(f"v{ver}")
-        ver_label.setStyleSheet(
-            "color: #4a5a6a; font-size: 10px; background: transparent;"
-        )
-        layout.addWidget(ver_label)
-
-        outer = QWidget()
-        outer_layout = QVBoxLayout(outer)
-        outer_layout.setContentsMargins(4, 4, 4, 4)
-        outer_layout.addWidget(card)
-        return outer
-
-    def _build_pipeline_page(self) -> QWidget:
-        card = GlassCard(margins=(20, 18, 20, 18), spacing=10)
-        layout = card.body
-
-        title = QLabel("Full Pipeline")
-        title.setStyleSheet(
-            "font-size: 19px; font-weight: 700; background: transparent;"
-        )
-        desc = QLabel(
-            "Run all stages in sequence: Preprocess → Detect Formations → "
-            "EPV + DAS → Timeline. Uses the settings from the top bar."
-        )
-        desc.setWordWrap(True)
-        desc.setStyleSheet(
-            "color: #8a9aaa; font-size: 12.5px; background: transparent;"
-        )
-
-        btn = QPushButton("▸ Run Full Pipeline")
-        btn.setObjectName("runButton")
-        btn.setMinimumHeight(40)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.clicked.connect(self.run_full_pipeline)
-
-        layout.addWidget(title)
-        layout.addWidget(desc)
-        layout.addSpacing(6)
-        layout.addWidget(btn)
-        layout.addStretch()
-
-        outer = QWidget()
-        outer_layout = QVBoxLayout(outer)
-        outer_layout.setContentsMargins(4, 4, 4, 4)
-        outer_layout.addWidget(card)
-        return outer
 
     # ---- empty tab placeholder ----
 
@@ -685,7 +605,7 @@ class MainWindow(QMainWindow):
         for btn in self.findChildren(QPushButton):
             if btn.objectName() == "runButton":
                 btn.setEnabled(not running)
-        self.nav.setEnabled(not running)
+        self.sidebar.set_enabled(not running)
         self.statusBar().showMessage(label if running else "Ready")
         self.log_panel.show_progress(running)
 
