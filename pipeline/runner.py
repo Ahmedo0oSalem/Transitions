@@ -14,6 +14,8 @@ from ..artifacts import (
     formation_result_from_dataframe,
 )
 
+from ..analytics.obso import compute_obso_for_match, aggregate_obso_by_window
+
 
 
 from ..analytics.pitch_control import compute_pitch_control_for_match, aggregate_pitch_control_by_window
@@ -124,3 +126,24 @@ def compute_pitch_control_artifact(
         window_df = pd.DataFrame()
     
     return pitch_control_result_from_frames(match_id, frame_df, window_df)
+
+
+
+def compute_obso_artifact(match_id, processed_dir, epv_grid_path=None, radius=5.0):
+    """Compute OBSO and aggregate by formation windows."""
+    import pandas as pd
+    from ...io.paths import match_dir
+    
+    # Compute frame-level OBSO
+    frame_df = compute_obso_for_match(match_id, processed_dir, epv_grid_path, radius)
+    
+    # Try to load formations
+    match_dir_path = match_dir(match_id, processed_dir)
+    formations_path = match_dir_path / "formations.csv"
+    if formations_path.is_file():
+        formations_df = pd.read_csv(formations_path)
+        window_df = aggregate_obso_by_window(frame_df, formations_df)
+    else:
+        window_df = pd.DataFrame()
+    
+    return {"frame": frame_df, "window": window_df}
