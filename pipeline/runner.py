@@ -13,6 +13,12 @@ from ..artifacts import (
     epv_result_from_dataframes,
     formation_result_from_dataframe,
 )
+
+
+
+from ..analytics.pitch_control import compute_pitch_control_for_match, aggregate_pitch_control_by_window
+from ..analytics.pitch_control.artifact import PitchControlResult, pitch_control_result_from_frames
+
 from ..io import paths as data_paths
 from ..preprocessing import preprocess
 from ..ui import timeline, viewer
@@ -98,3 +104,23 @@ def run_viewer(match_id: str | int, processed_dir: str, speed: float = 1.0) -> o
 
     return viewer.run_app(str(match_id), str(processed_dir), speed)
 
+# In Transitions/pipeline/runner.py
+
+def compute_pitch_control_artifact(
+    match_id: str | int,
+    processed_dir: str,
+    downsample: int = 1,
+) -> PitchControlResult:
+    """Compute pitch control and merge with formations."""
+    frame_df = compute_pitch_control_for_match(match_id, processed_dir, downsample=downsample)
+    
+    # Load formations
+    match_dir_path = match_dir(match_id, processed_dir)
+    formations_path = match_dir_path / "formations.csv"
+    if formations_path.is_file():
+        formations_df = pd.read_csv(formations_path)
+        window_df = aggregate_pitch_control_by_window(frame_df, formations_df)
+    else:
+        window_df = pd.DataFrame()
+    
+    return pitch_control_result_from_frames(match_id, frame_df, window_df)
