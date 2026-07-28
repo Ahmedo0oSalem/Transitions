@@ -156,13 +156,15 @@ class AccordionSidebar(QWidget):
     """
 
     SECTIONS: list[tuple[str, str, str]] = [
-        ("Home",              "Run the full pipeline, or execute individual steps below.", "▸ Run Full Pipeline"),
-        ("Preprocess",        "Process raw tracking data into structured JSONL + metadata.", "▸ Run Preprocess"),
-        ("Formations",        "Detect team formations from player positions using template matching.", "▸ Detect Formations"),
-        ("EPV + DAS",        "Compute Expected Possession Value and Dangerous Action Sequences.", "▸ Run EPV + DAS"),
-        ("Timeline",          "Plot formation changes over the match.", "▸ Show Timeline"),
-        ("Viewer",            "Interactive match viewer with scrubbable slider and playback controls.", "▸ Open Match Viewer"),
-    ]
+    ("Home",              "Run the full pipeline, or execute individual steps below.", "▸ Run Full Pipeline"),
+    ("Preprocess",        "Process raw tracking data into structured JSONL + metadata.", "▸ Run Preprocess"),
+    ("Formations",        "Detect team formations from player positions using template matching.", "▸ Detect Formations"),
+    ("EPV + DAS",         "Compute Expected Possession Value and Dangerous Action Sequences.", "▸ Run EPV + DAS"),
+    ("Pitch Control",     "Compute pitch control per formation window.", "▸ Compute Pitch Control"),          # new
+    ("OBSO",              "Compute Off-Ball Scoring Opportunity per formation window.", "▸ Compute OBSO"),    # new
+    ("Timeline",          "Plot formation changes over the match.", "▸ Show Timeline"),
+    ("Viewer",            "Interactive match viewer with scrubbable slider and playback controls.", "▸ Open Match Viewer"),
+]
 
     def __init__(self, callbacks: list[Callable[[], None]], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -535,13 +537,15 @@ class MainWindow(QMainWindow):
 
         # ---- Left accordion sidebar ----
         self.sidebar = AccordionSidebar(callbacks=[
-            self.run_full_pipeline,
-            self.run_preprocess,
-            self.run_formations,
-            self.run_epv,
-            self.run_timeline,
-            self.run_viewer,
-        ])
+             self.run_full_pipeline,
+             self.run_preprocess,
+             self.run_formations,
+             self.run_epv,
+             self.run_pitch_control,      # new
+             self.run_obso,               # new
+             self.run_timeline,
+             self.run_viewer,
+])
         main_layout.addWidget(self.sidebar)
 
         # ---- Vertical separator ----
@@ -673,6 +677,33 @@ class MainWindow(QMainWindow):
             title = label if len(figures) == 1 else f"{label} {index}"
             self.tabs.addTab(FigureTab(title, figure), title)
             self.tabs.setCurrentIndex(self.tabs.count() - 1)
+    #---- obso and pitch control run methods ----
+    def run_pitch_control(self) -> None:
+       match_id = self._match_id()
+       if match_id is None:
+         return
+       from ..pipeline.runner import pitch_control_figure
+       import matplotlib.pyplot as plt
+       plt.switch_backend("Agg")
+       fig, df = pitch_control_figure(
+           match_id,
+           processed_dir=self.top.processed_dir,
+        )
+       self._show_result("Pitch Control", fig)
+
+    def run_obso(self) -> None:
+       match_id = self._match_id()
+       if match_id is None:
+         return
+       from ..pipeline.runner import obso_figure
+       import matplotlib.pyplot as plt
+       plt.switch_backend("Agg")
+       fig, df = obso_figure(
+          match_id,
+          processed_dir=self.top.processed_dir,
+          epv_grid_path=self.top.epv_grid,
+       )
+       self._show_result("OBSO", fig)
 
     # ---- run methods ----
 
@@ -732,7 +763,7 @@ class MainWindow(QMainWindow):
             show=True,
             block=False,
         )
-
+    
     def run_full_pipeline(self) -> None:
         match_id = self._match_id()
         if match_id is None:
@@ -742,7 +773,7 @@ class MainWindow(QMainWindow):
         epv_grid = self.top.epv_grid
         window_seconds = self.top.window_seconds
         stride_seconds = self.top.stride_seconds
-
+      
         def _run() -> tuple:
             runner.preprocess_all_matches(match_id=match_id,
                                           raw_tracking_dir=raw_dir)

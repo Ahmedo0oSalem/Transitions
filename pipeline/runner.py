@@ -16,6 +16,9 @@ from ..artifacts import (
 
 from ..analytics.obso import compute_obso_for_match, aggregate_obso_by_window
 
+import matplotlib.pyplot as plt
+from matplotlib.table import Table
+import pandas as pd
 
 
 from ..analytics.pitch_control import compute_pitch_control_for_match, aggregate_pitch_control_by_window
@@ -24,7 +27,7 @@ from ..analytics.pitch_control.artifact import PitchControlResult, pitch_control
 from ..io import paths as data_paths
 from ..preprocessing import preprocess
 from ..ui import timeline, viewer
-
+from ..io.paths import match_dir
 
 def preprocess_all_matches(match_id: str | None = None, raw_tracking_dir: str | None = None) -> None:
     """Run preprocessing over tracking files for one or all matches.
@@ -132,7 +135,6 @@ def compute_pitch_control_artifact(
 def compute_obso_artifact(match_id, processed_dir, epv_grid_path=None, radius=5.0):
     """Compute OBSO and aggregate by formation windows."""
     import pandas as pd
-    from ...io.paths import match_dir
     
     # Compute frame-level OBSO
     frame_df = compute_obso_for_match(match_id, processed_dir, epv_grid_path, radius)
@@ -147,3 +149,91 @@ def compute_obso_artifact(match_id, processed_dir, epv_grid_path=None, radius=5.
         window_df = pd.DataFrame()
     
     return {"frame": frame_df, "window": window_df}
+
+
+
+# --- Helper to create a table figure ---
+def _df_to_table_figure(df, title, metric_col='mean_home_control'):
+    """
+    Create a bar chart for the given metric column per formation window.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    
+    if df.empty:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.axis('off')
+        ax.text(0.5, 0.5, "No data available", ha='center', va='center')
+        return fig
+    
+    # If metric_col not in df, try to find one
+    if metric_col not in df.columns:
+        for col in ['mean_home_control', 'mean_away_control', 'mean_obso']:
+            if col in df.columns:
+                metric_col = col
+                break
+        else:
+            metric_col = None
+    
+    if metric_col is None:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.axis('off')
+        ax.text(0.5, 0.5, "No metric column found", ha='center', va='center')
+        return fig
+    
+    # Create a readable window label (e.g., "1-300s")
+    df = df.copy()
+    df['window'] = df['windowStartSec'].astype(str) + '-' + df['windowEndSec'].astype(str) + 's'
+    
+    # Pivot by team for side-by-side bars (if we have both home and away)
+    # For now, just plot each row as a bar, color by team
+    fig, ax = plt.subplots(figsize=(14, 6))
+    
+    teams = df['team']
+    x = np.arange(len(df))
+    width = 0.6
+    
+    colors = {'home': '#3498db', 'away': '#e74c3c'}  # blue for home, red for away
+    bar_colors = [colors.get(t, 'gray') for t in teams]
+    
+    bars = ax.bar(x, df[metric_col], width, color=bar_colors, alpha=0.8)
+    
+    # Add formation labels on top of bars
+    for i, (bar, formation) in enumerate(zip(bars, df['formation'])):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+                formation, ha='center', va='bottom', fontsize=7, rotation=45)
+    
+    # Add period labels on x-axis
+    ax.set_xticks(x)
+    ax.set_xticklabels(df['window'], rotation=45, ha='right', fontsize=8)
+    
+    ax.set_ylabel(metric_col.replace('_', ' ').title())
+    ax.set_xlabel('Window (start-end seconds)')
+    ax.set_title(title, fontsize=14)
+    
+    # Add legend for teams
+    from matplotlib.patches import Patch
+    legend_elements = [Patch(facecolor='#3498db', label='Home'),
+                       Patch(facecolor='#e74c3c', label='Away')]
+    ax.legend(handles=legend_elements, loc='upper right')
+    
+    ax.grid(axis='y', linestyle='--', alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
+def pitch_control_figure(match_id, processed_dir, downsample=1):
+    result = compute_pitch_control_artifact(match_id, processed_dir, downsample)
+    window_df = result.window_control
+    # Show mean_home_control (or you could choose mean_away_control)
+    fig = _df_to_table_figure(window_df, f"Pitch Control – Match {match_id}", metric_col='mean_home_control')
+    return fig, window_df
+
+def obso_figure(match_id, processed_dir, epv_grid_path=None, radius=5.0):
+    result = compute_obso_artifact(match_id, processed_dir, epv_grid_path, radius)
+    window_df = result["window"]
+    fig = _df_to_table_figure(window_df, f"OBSO – Match {match_id}", metric_col='mean_obso')
+    return fig, window_df
+
