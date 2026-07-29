@@ -532,7 +532,7 @@ class MainWindow(QMainWindow):
 
         # ---- Timeline controls (inserted into the Timeline drawer) ----
         self._timeline_method = QComboBox()
-        self._timeline_method.addItems(["Voted (confidence-weighted)", "Voted runs (window granularity)"])
+        self._timeline_method.addItems(["Single line", "Piano roll"])
         self._timeline_method.setMinimumHeight(28)
         self._timeline_method.setStyleSheet(
             "font-size: 11px; padding: 2px 4px;"
@@ -543,7 +543,7 @@ class MainWindow(QMainWindow):
         self._timeline_granularity.setStyleSheet(
             "font-size: 11px; padding: 2px 4px;"
         )
-        timeline_body = self.sidebar._sections[4]["body"]
+        timeline_body = self.sidebar._sections[6]["body"]
         timeline_body.layout().insertWidget(1, self._timeline_method)
         timeline_body.layout().insertWidget(2, self._timeline_granularity)
 
