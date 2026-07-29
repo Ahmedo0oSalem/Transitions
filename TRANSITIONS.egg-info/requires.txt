@@ -1,0 +1,7 @@
+matplotlib>=3.8
+mplsoccer>=1.6
+numpy>=2.0
+pandas>=2.0
+PyQt6>=6.5
+scipy>=1.11
+seaborn>=0.13

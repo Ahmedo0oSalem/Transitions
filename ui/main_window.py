@@ -24,7 +24,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QTabWidget,
@@ -38,7 +37,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolb
 
 from ..io.paths import EPV_GRID_PATH, PROCESSED_DIR, RAW_TRACKING_DIR
 from ..pipeline import runner
-from . import viewer
+from . import timeline, viewer
 from .theme import GlassCard, apply_glass_shadow, wrap_in_glass
 
 
@@ -104,15 +103,7 @@ class Worker(QObject):
 
 
 class FigureTab(QWidget):
-    """Widget hosting a matplotlib figure + navigation toolbar.
-
-    The canvas grows to fill available space, but never shrinks below a
-    legible minimum — below that, a scrollbar appears instead of the
-    plot becoming unreadable.
-    """
-
-    MIN_CANVAS_WIDTH = 480
-    MIN_CANVAS_HEIGHT = 320
+    """Widget hosting a matplotlib figure + navigation toolbar."""
 
     def __init__(self, title: str, figure) -> None:
         super().__init__()
@@ -123,22 +114,13 @@ class FigureTab(QWidget):
         if not isinstance(canvas, FigureCanvasQTAgg):
             canvas = FigureCanvasQTAgg(figure)
         canvas.setParent(self)
-
         canvas.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        canvas.setMinimumSize(self.MIN_CANVAS_WIDTH, self.MIN_CANVAS_HEIGHT)
 
         toolbar = NavigationToolbar2QT(canvas, self)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(canvas)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-
         layout.addWidget(toolbar)
-        layout.addWidget(scroll, 1)
+        layout.addWidget(canvas, 1)
 
         canvas.draw_idle()
         self.canvas = canvas
@@ -544,6 +526,23 @@ class MainWindow(QMainWindow):
         ])
         main_layout.addWidget(self.sidebar)
 
+        # ---- Timeline controls (inserted into the Timeline drawer) ----
+        self._timeline_method = QComboBox()
+        self._timeline_method.addItems(["Voted (confidence-weighted)", "Voted runs (window granularity)"])
+        self._timeline_method.setMinimumHeight(28)
+        self._timeline_method.setStyleSheet(
+            "font-size: 11px; padding: 2px 4px;"
+        )
+        self._timeline_granularity = QComboBox()
+        self._timeline_granularity.addItems(["Detail (variant)", "Overview (family)"])
+        self._timeline_granularity.setMinimumHeight(28)
+        self._timeline_granularity.setStyleSheet(
+            "font-size: 11px; padding: 2px 4px;"
+        )
+        timeline_body = self.sidebar._sections[4]["body"]
+        timeline_body.layout().insertWidget(1, self._timeline_method)
+        timeline_body.layout().insertWidget(2, self._timeline_granularity)
+
         # ---- Vertical separator ----
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
@@ -713,10 +712,16 @@ class MainWindow(QMainWindow):
         match_id = self._match_id()
         if match_id is None:
             return
-        self._start_worker(
-            "Timeline",
-            lambda: runner.run_timeline(match_id, self.top.processed_dir),
+        import matplotlib.pyplot as plt
+
+        method = "voted" if self._timeline_method.currentIndex() == 0 else "all_formations"
+        granularity = "variant" if self._timeline_granularity.currentIndex() == 0 else "family"
+        plt.switch_backend("QtAgg")
+        timeline.plot_formation_timeline(
+            match_id, self.top.processed_dir,
+            method=method, granularity=granularity,
         )
+        plt.show(block=False)
 
     def run_viewer(self) -> None:
         match_id = self._match_id()
