@@ -134,12 +134,13 @@ def load_match(match_id, processed_dir):
     goalkeepers = df_mod.resolve_goalkeepers(tracking_path, metadata)
 
     formations_df = None
-    if formations_path.is_file():
-        formations_df = pd.read_csv(formations_path)
-        print(f"Loaded {len(formations_df)} formation-window rows from formations.csv")
-    else:
-        print("No formations.csv found -- formation labels will show as 'n/a'.")
-
+    segments_df = None
+    segments_path = match_dir_path / "formation_segments.csv"
+    if segments_path.is_file():
+        segments_df = pd.read_csv(segments_path)
+        print(f"Loaded {len(segments_df)} formation segments from formation_segments.csv")
+        
+    # Update the return dictionary to include segments_df:
     return {
         "metadata": metadata,
         "pitch_length": pitch_length,
@@ -153,12 +154,33 @@ def load_match(match_id, processed_dir):
         "ball_xy": ball_xy,
         "goalkeepers": goalkeepers,
         "formations_df": formations_df,
+        "segments_df": segments_df,  # <-- Add this line
     }
 
 
-def get_formation_label(formations_df, team, period, elapsed_sec):
+def get_formation_label(formations_df, segments_df, team, period, elapsed_sec):
+    """Get formation label with segment properties if available."""
+    # Try to find the segment first (more accurate for current moment)
+    if segments_df is not None and not segments_df.empty:
+        seg_sub = segments_df[
+            (segments_df["team"] == team)
+            & (segments_df["period"] == period)
+            & (segments_df["start_sec"] <= elapsed_sec)
+            & (elapsed_sec < segments_df["end_sec"])
+        ]
+        if not seg_sub.empty:
+            row = seg_sub.iloc[0]
+            # Format: "4-3-3 | 12m | Compact: 8.2m | Attacking: 65%"
+            duration_min = int(row["duration"] // 60)
+            compactness = row.get("mean_compactness", 0)
+            total_poss = row.get("in_possession_sec", 0) + row.get("out_of_possession_sec", 0) + row.get("loose_ball_sec", 0)
+            attacking_pct = int((row.get("in_possession_sec", 0) / total_poss * 100) if total_poss > 0 else 0)
+            return f"{row['variant']} | {duration_min}m | Compact: {compactness:.1f}m | Attacking: {attacking_pct}%"
+    
+    # Fallback to window-based label
     if formations_df is None:
         return "N/A"
+        
     sub = formations_df[
         (formations_df["team"] == team)
         & (formations_df["period"] == period)
@@ -169,8 +191,6 @@ def get_formation_label(formations_df, team, period, elapsed_sec):
         return "Transitioning"
     row = sub.loc[sub["windowStartSec"].idxmax()]
     return f"{row['formation']}"
-
-
 # ==========================
 # UI
 # ==========================
@@ -216,19 +236,15 @@ def run_app(match_id, processed_dir, speed, show=True, block=True):
     poss_text = fig.text(0.5, 0.85, "BALL: LOOSE", fontsize=10, fontweight="bold", color=TEXT_SECONDARY, ha="center")
 
     # --- Plotting Elements ---
-    # Slight alpha for modern look, removes clunky white borders
     home_scatter = ax.scatter([], [], s=220, c=HOME_COLOR, alpha=0.9, zorder=3)
     away_scatter = ax.scatter([], [], s=220, c=AWAY_COLOR, alpha=0.9, zorder=3)
     
-    # Ball gets a layered glow effect
     ball_glow = ax.scatter([], [], s=180, c=BALL_COLOR, alpha=0.2, zorder=4)
     ball_scatter = ax.scatter([], [], s=60, c=BALL_COLOR, edgecolors=MODERN_BG, linewidths=1.5, zorder=5)
     
-    # Possession ring modernized to a glowing dashed outline
     possession_ring = ax.scatter([], [], s=500, facecolors="none", edgecolors=POSSESSION_RING_COLOR, 
                                  linewidths=2, linestyle="--", alpha=0.8, zorder=2)
 
-    # Jersey numbers
     home_texts = [ax.text(OFF_SCREEN, OFF_SCREEN, "", ha="center", va="center",
                            fontsize=8, fontweight="bold", color=MODERN_BG, zorder=6)
                   for _ in data["home_ids"]]
@@ -306,13 +322,13 @@ def run_app(match_id, processed_dir, speed, show=True, block=True):
         clock_text.set_text(f"{mm:02d}:{ss:02d}")
         period_text.set_text(f"PERIOD {period}")
         
-        home_form_text.set_text(f"Formation: {get_formation_label(data['formations_df'], 'home', period, elapsed_sec)}")
-        away_form_text.set_text(f"Formation: {get_formation_label(data['formations_df'], 'away', period, elapsed_sec)}")
+        # UPDATED: Pass segments_df to get_formation_label
+        home_form_text.set_text(f"Formation: {get_formation_label(data['formations_df'], data.get('segments_df'), 'home', period, elapsed_sec)}")
+        away_form_text.set_text(f"Formation: {get_formation_label(data['formations_df'], data.get('segments_df'), 'away', period, elapsed_sec)}")
 
         fig.canvas.draw_idle()
 
     # --- Modern UI Controls ---
-    # Slider
     ax_slider = plt.axes([0.15, 0.05, 0.65, 0.03])
     ax_slider.set_facecolor(MODERN_BG)
     slider = Slider(
@@ -326,7 +342,6 @@ def run_app(match_id, processed_dir, speed, show=True, block=True):
     slider.valtext.set_color(TEXT_PRIMARY)
     slider.on_changed(update)
 
-    # Play / Pause Button
     playing = {"on": False}
     ax_button = plt.axes([0.85, 0.045, 0.1, 0.04])
     play_button = Button(ax_button, "▶ PLAY", color=MODERN_LINES, hovercolor="#555555")
@@ -359,8 +374,6 @@ def run_app(match_id, processed_dir, speed, show=True, block=True):
     if show:
         plt.show(block=block)
     return fig
-
-
 # ==========================
 # CLI
 # ==========================

@@ -2,7 +2,7 @@
 
 from .ball import Ball
 from .epv import DangerousAttackingSequence, EPVPoint
-from .formation import FormationWindow
+from .formation import FormationWindow, FormationSegment
 from .frame import Frame
 from .match import Match
 from .player import PlayerPosition
