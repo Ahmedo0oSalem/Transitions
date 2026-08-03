@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "TRANSITIONS"
+version = "0.1.0"
+description = "Modular football analytics research framework"
+requires-python = ">=3.10"
+dependencies = [
+    "matplotlib>=3.8",
+    "mplsoccer>=1.6",
+    "numpy>=2.0",
+    "pandas>=2.0",
+    "PyQt6>=6.5",
+    "scipy>=1.11",
+    "seaborn>=0.13",
+]
+
+[project.urls]
+Repository = "https://github.com/anomalyco/Transitions"
+
+[project.scripts]
+transitions = "Transitions.cli.main:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["Transitions*"]
+
+[tool.setuptools.package-data]
+Transitions = ["py.typed"]

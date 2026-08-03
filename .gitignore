@@ -6,3 +6,4 @@ __pycache__
 Event_Data
 
 .DS_Store
+data/

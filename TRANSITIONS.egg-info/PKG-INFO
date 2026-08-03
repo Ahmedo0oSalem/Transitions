@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: TRANSITIONS
+Version: 0.1.0
+Summary: Modular football analytics research framework
+Project-URL: Repository, https://github.com/anomalyco/Transitions
+Requires-Python: >=3.10
+Requires-Dist: matplotlib>=3.8
+Requires-Dist: mplsoccer>=1.6
+Requires-Dist: numpy>=2.0
+Requires-Dist: pandas>=2.0
+Requires-Dist: PyQt6>=6.5
+Requires-Dist: scipy>=1.11
+Requires-Dist: seaborn>=0.13
