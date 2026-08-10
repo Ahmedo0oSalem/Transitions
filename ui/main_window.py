@@ -57,8 +57,8 @@ class Worker(QObject):
     """Runs a callable in a background thread.
     Pipeline steps can report progress by printing lines like::
          PROGRESS: 50 Training model...
-     Values: -1 = indeterminate, 0-100 = determinate.
-     """
+    Values: -1 = indeterminate, 0-100 = determinate.
+    """
     log = pyqtSignal(str)
     progress = pyqtSignal(int, str)  # value, message
     finished = pyqtSignal(str, object)
@@ -88,7 +88,7 @@ class Worker(QObject):
             self.failed.emit(traceback.format_exc())
 
 class FigureTab(QWidget):
-    """Widget hosting a matplotlib figure + navigation toolbar + legend button."""
+    """Widget hosting a matplotlib figure + navigation toolbar."""
     def __init__(self, title: str, figure) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
@@ -106,43 +106,6 @@ class FigureTab(QWidget):
         canvas.draw_idle()
         self.canvas = canvas
         self.title = title
-        
-        # Add "Show Legend" button if figure has legend data
-        if hasattr(figure, '_legend_handles') and figure._legend_handles:
-            legend_btn = QPushButton("Show Legend")
-            legend_btn.setObjectName("runButton")
-            legend_btn.setMinimumHeight(32)
-            legend_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            legend_btn.clicked.connect(lambda: self._show_legend(figure))
-            layout.addWidget(legend_btn)
-    
-    def _show_legend(self, figure):
-        """Open a popup window with the full legend."""
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QListWidget
-        
-        popup = QDialog(self)
-        popup.setWindowTitle(f"Legend - {self.title}")
-        popup.setMinimumSize(400, 300)
-        
-        layout = QVBoxLayout(popup)
-        
-        if hasattr(figure, '_legend_title'):
-            title_label = QLabel(f"<b>{figure._legend_title}</b>")
-            title_label.setStyleSheet("font-size: 14px; font-weight: bold;")
-            layout.addWidget(title_label)
-        
-        legend_list = QListWidget()
-        for handle, label in zip(figure._legend_handles, figure._legend_labels):
-            item_text = label
-            legend_list.addItem(item_text)
-        
-        layout.addWidget(legend_list)
-        
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(popup.close)
-        layout.addWidget(close_btn)
-        
-        popup.exec()
 
 # =====================================================================
 # Accordion Sidebar
@@ -153,15 +116,16 @@ class AccordionSidebar(QWidget):
     hidden drawer (description + run button). Only one drawer is open
     at a time.
     """
+    # Added "2D Analysis" at index 7, shifted Viewer to index 8
     SECTIONS: list[tuple[str, str, str]] = [
         ("Home",              "Run the full pipeline, or execute individual steps below.", "▸ Run Full Pipeline"),
-        ("Preprocess",        "Process raw tracking data into structured JSONL + metadata.", " Run Preprocess"),
+        ("Preprocess",        "Process raw tracking data into structured JSONL + metadata.", "▸ Run Preprocess"),
         ("Formations",        "Detect team formations from player positions using template matching.", "▸ Detect Formations"),
         ("EPV + DAS",         "Compute Expected Possession Value and Dangerous Action Sequences.", "▸ Run EPV + DAS"),
         ("Pitch Control",     "Compute pitch control per formation window.", "▸ Compute Pitch Control"),
-        ("OBSO",              "Compute Off-Ball Scoring Opportunity per formation window.", "▸ Compute OBSO"),
+        ("OBSO",              "Compute Off-Ball Scoring Opportunity per formation window.", " Compute OBSO"),
         ("Timeline",          "Plot formation changes over the match.", "▸ Show Timeline"),
-        ("2D Analysis",       "Tactical analysis of formation segments in 2D space.", "▸ Run 2D Analysis"),
+        ("2D Analysis",       "Tactical analysis of formation segments in 2D space.", " Run 2D Analysis"),
         ("Viewer",            "Interactive match viewer with scrubbable slider and playback controls.", "▸ Open Match Viewer"),
     ]
 
@@ -513,6 +477,7 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(0)
 
         # ---- Left accordion sidebar ----
+        # Note: 2D Analysis is at index 7, Viewer is at index 8
         self.sidebar = AccordionSidebar(callbacks=[
              self.run_full_pipeline,
              self.run_preprocess,
@@ -521,12 +486,12 @@ class MainWindow(QMainWindow):
              self.run_pitch_control,
              self.run_obso,
              self.run_timeline,
-             self.run_2d_analysis,
+             self.run_2d_analysis,  # New
              self.run_viewer,
         ])
         main_layout.addWidget(self.sidebar)
 
-        # ---- Timeline controls (inserted into the Timeline drawer) ----
+        # ---- Timeline controls (inserted into the Timeline drawer at index 6) ----
         self._timeline_method = QComboBox()
         self._timeline_method.addItems(["Single line", "Piano roll"])
         self._timeline_method.setMinimumHeight(28)
@@ -535,13 +500,13 @@ class MainWindow(QMainWindow):
         self._timeline_granularity = QComboBox()
         self._timeline_granularity.addItems(["Detail (variant)", "Overview (family)"])
         self._timeline_granularity.setMinimumHeight(28)
-        self._timeline_granularity.setStyleSheet("font-size:11px; padding: 2px 4px;")
+        self._timeline_granularity.setStyleSheet("font-size: 11px; padding: 2px 4px;")
         
         timeline_body = self.sidebar._sections[6]["body"]
         timeline_body.layout().insertWidget(1, self._timeline_method)
         timeline_body.layout().insertWidget(2, self._timeline_granularity)
 
-        # ---- 2D Analysis controls (inserted into the 2D Analysis drawer) ----
+        # ---- 2D Analysis controls (inserted into the 2D Analysis drawer at index 7) ----
         self._2d_controls = self._build_2d_controls()
         analysis_body = self.sidebar._sections[7]["body"]
         analysis_body.layout().insertWidget(1, self._2d_controls)
@@ -599,7 +564,6 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        # Helper to create a labeled dropdown
         def make_combo(label_text: str, items: list[str]) -> QComboBox:
             lbl = QLabel(label_text)
             lbl.setObjectName("fieldLabel")
@@ -630,19 +594,26 @@ class MainWindow(QMainWindow):
         self._2d_formation = make_combo("FORMATION", ["All"])
         self._2d_min_duration = make_spin("MIN DURATION (s)", 0, 3600, 0)
 
-        # Separator
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color: rgba(255,255,255,0.08); margin: 4px 0;")
         layout.addWidget(sep)
 
         # --- Visual Encodings ---
-        self._2d_x_axis = make_combo("X-AXIS", ["Width", "Depth", "Compactness", "Duration"])
-        self._2d_y_axis = make_combo("Y-AXIS", ["Compactness", "Width", "Depth"])
-        self._2d_color = make_combo("COLOR", ["Formation Family", "Compactness", "Confidence"])
-        self._2d_shape = make_combo("SHAPE", ["Formation", "Formation Family", "Team"])
-        self._2d_size = make_combo("POINT SIZE", ["None", "Duration"])
-
+        metrics_list = ["Width", "Depth", "Compactness", "Duration", "Center X", "Center Y", 
+                        "Elongation", "Centroid Displacement", "Centroid Velocity", "Confidence"]
+        
+        self._2d_x_axis = make_combo("X-AXIS", metrics_list)
+        self._2d_x_axis.setCurrentText("Width")
+        
+        self._2d_y_axis = make_combo("Y-AXIS", metrics_list)
+        self._2d_y_axis.setCurrentText("Depth")
+        
+        self._2d_color = make_combo("COLOR", metrics_list)
+        self._2d_color.setCurrentText("Compactness")
+        
+        self._2d_shape = make_combo("SHAPE", ["Formation Family", "Formation"])
+        
         layout.addStretch()
         return container
 
@@ -650,8 +621,7 @@ class MainWindow(QMainWindow):
     def _match_id(self) -> str | None:
         match_id = self.top.match_id
         if not match_id:
-            QMessageBox.warning(self, "Missing match ID",
-                                "Enter a match ID in the top bar.")
+            QMessageBox.warning(self, "Missing match ID", "Enter a match ID in the top bar.")
             return None
         return match_id
 
@@ -728,7 +698,7 @@ class MainWindow(QMainWindow):
             self.tabs.addTab(FigureTab(title, figure), title)
             self.tabs.setCurrentIndex(self.tabs.count() - 1)
 
-    #---- obso and pitch control run methods ----
+    # ---- obso and pitch control run methods ----
     def run_pitch_control(self) -> None:
         match_id = self._match_id()
         if match_id is None:
@@ -805,18 +775,16 @@ class MainWindow(QMainWindow):
         plt.show(block=False)
 
     def run_2d_analysis(self) -> None:
-        """Run 2D analysis and show the plot with a working Show Legend button."""
+        """Stage 2: Generate the 2D scatter plot."""
         match_id = self._match_id()
         if match_id is None:
             return
-        
-        # Import here to avoid circular imports
-        from ..ui.two_d_analysis import plot_2d_analysis
-        
+            
         import matplotlib.pyplot as plt
         plt.switch_backend("QtAgg")
         
-        # Gather filters
+        from .two_d_analysis import plot_2d_analysis
+        
         filters = {
             "team": self._2d_team.currentText(),
             "period": self._2d_period.currentText(),
@@ -824,22 +792,15 @@ class MainWindow(QMainWindow):
             "min_duration": self._2d_min_duration.value(),
         }
         
-        # Gather visual encodings
         encodings = {
             "x_axis": self._2d_x_axis.currentText(),
             "y_axis": self._2d_y_axis.currentText(),
             "color": self._2d_color.currentText(),
             "shape": self._2d_shape.currentText(),
-            "size": self._2d_size.currentText(),
         }
         
         try:
-            fig = plot_2d_analysis(
-                match_id, 
-                self.top.processed_dir, 
-                filters, 
-                encodings
-            )
+            fig = plot_2d_analysis(match_id, self.top.processed_dir, filters, encodings)
             self._show_result("2D Analysis", fig)
         except Exception as e:
             import traceback
