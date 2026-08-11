@@ -6,6 +6,7 @@ Stage 3: Enhanced interactions, legends, and metadata attachment.
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import Normalize
 from ..io.paths import match_dir
 from ..analytics.formations.taxonomy import derive_hierarchy
 from .theme import FIG_FACE, TEXT_PRIMARY, LABEL_COLOR, TICK_COLOR, GRID
@@ -100,14 +101,21 @@ def plot_2d_analysis(match_id, processed_dir, filters, encodings):
     is_color_metric = color_col_label in METRIC_COLS
     is_shape_cat = shape_col_label in CAT_COLS
     
-    # --- Color Logic ---
-    cmap = plt.cm.viridis; norm = None
+    # --- Prepare Color Data ---
+    cmap = None; norm = None; colors = '#3498db' # Default fallback
+    
     if is_color_metric:
         color_col = METRIC_COLS[color_col_label]
-        vmin, vmax = plot_df[color_col].min(), plot_df[color_col].max()
-        from matplotlib.colors import Normalize
+        c_values = plot_df[color_col].values
+        vmin, vmax = float(np.nanmin(c_values)), float(np.nanmax(c_values))
+        cmap = plt.cm.viridis
         norm = Normalize(vmin=vmin, vmax=vmax)
-    
+        # Store numeric values for proper masking later
+        colors = c_values 
+    else:
+        # For categorical colors, we'll handle them during scatter plotting
+        pass
+        
     # --- Shape Logic ---
     shape_map = {}; shape_categories = []
     if is_shape_cat:
@@ -117,34 +125,56 @@ def plot_2d_analysis(match_id, processed_dir, filters, encodings):
     
     # --- 5. Plotting ---
     fig._scatter_map = {} 
+    
     if shape_map:
         for cat, marker in shape_map.items():
             mask = plot_df[shape_col] == cat
             sub_df = plot_df[mask]
             if sub_df.empty: continue
-            sub_colors = sub_df[METRIC_COLS[color_col_label]] if is_color_metric else '#3498db'
+            
+            # Determine colors for this subset
+            if is_color_metric:
+                # Use boolean mask on the numpy array
+                sub_colors = colors[mask.values] 
+            else:
+                # If coloring by category, map each row to a color
+                cat_col = CAT_COLS.get(color_col_label, 'variant')
+                unique_cats = sorted(plot_df[cat_col].unique())
+                cat_cmap = plt.cm.tab10
+                color_lookup = {c: cat_cmap(i % 10) for i, c in enumerate(unique_cats)}
+                sub_colors = [color_lookup[v] for v in sub_df[cat_col]]
+                
             sc = ax.scatter(sub_df[x_col], sub_df[y_col], c=sub_colors, cmap=cmap, norm=norm,
                             marker=marker, s=80, alpha=0.7, edgecolors='white', linewidth=0.5, label=str(cat), zorder=3)
             fig._scatter_map[sc] = sub_df['plot_id'].values
     else:
-        colors = plot_df[METRIC_COLS[color_col_label]] if is_color_metric else '#3498db'
-        sc = ax.scatter(plot_df[x_col], plot_df[y_col], c=colors, cmap=cmap, norm=norm,
-                        marker='o', s=80, alpha=0.7, edgecolors='white', linewidth=0.5, zorder=3)
+        # No shape encoding, plot all at once
+        if is_color_metric:
+            sc = ax.scatter(plot_df[x_col], plot_df[y_col], c=colors, cmap=cmap, norm=norm,
+                            marker='o', s=80, alpha=0.7, edgecolors='white', linewidth=0.5, zorder=3)
+        else:
+            # Categorical color without shapes
+            cat_col = CAT_COLS.get(color_col_label, 'variant')
+            unique_cats = sorted(plot_df[cat_col].unique())
+            cat_cmap = plt.cm.tab10
+            color_lookup = {c: cat_cmap(i % 10) for i, c in enumerate(unique_cats)}
+            plot_colors = [color_lookup[v] for v in plot_df[cat_col]]
+            sc = ax.scatter(plot_df[x_col], plot_df[y_col], c=plot_colors,
+                            marker='o', s=80, alpha=0.7, edgecolors='white', linewidth=0.5, zorder=3)
+            
         fig._scatter_map[sc] = plot_df['plot_id'].values
-
-    # --- FIX: Hide the inline matplotlib legend ---
-    # We use the PyQt6 button instead, so we disable the default legend
+    
+    # Hide inline matplotlib legend (we use the PyQt6 button instead)
     ax.legend().set_visible(False)
-    # ---------------------------------------------
-
-    # Colorbar
+    
+    # Colorbar only for continuous metrics
     if is_color_metric and cmap is not None:
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
         cbar = fig.colorbar(sm, ax=ax, shrink=0.8)
         cbar.set_label(color_col_label, color=LABEL_COLOR, fontsize=10)
         cbar.ax.yaxis.set_tick_params(color=TICK_COLOR); cbar.outline.set_color(GRID)
-
+    
     # Labels and Layout
     ax.set_xlabel(encodings["x_axis"], color=LABEL_COLOR, fontsize=12)
     ax.set_ylabel(encodings["y_axis"], color=LABEL_COLOR, fontsize=12)
@@ -173,5 +203,5 @@ def plot_2d_analysis(match_id, processed_dir, filters, encodings):
     
     # Selection ring
     fig._selection_ring = ax.scatter([], [], s=200, facecolors='none', edgecolors='#f1c40f', linewidths=2, zorder=4)
-
+    
     return fig

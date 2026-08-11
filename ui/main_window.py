@@ -169,7 +169,6 @@ class FigureTab(QWidget):
     def _setup_interactions(self, figure):
         if not hasattr(figure, '_segment_records'):
             return
-            
         canvas = self.canvas
         
         def on_hover(event):
@@ -185,16 +184,27 @@ class FigureTab(QWidget):
                     plot_id = ids[idx]
                     record = figure._segment_records[plot_id]
                     
-                    # Update annotation text
+                    # Update annotation text - safely handle numeric formatting
                     enc = figure._encodings
                     x_val = record.get(METRIC_COLS.get(enc['x_axis'], ''), 'N/A')
                     y_val = record.get(METRIC_COLS.get(enc['y_axis'], ''), 'N/A')
                     
+                    # Format values safely - only apply :.2f if value is numeric
+                    try:
+                        x_formatted = f"{float(x_val):.2f}" if x_val != 'N/A' else 'N/A'
+                    except (ValueError, TypeError):
+                        x_formatted = str(x_val)
+                        
+                    try:
+                        y_formatted = f"{float(y_val):.2f}" if y_val != 'N/A' else 'N/A'
+                    except (ValueError, TypeError):
+                        y_formatted = str(y_val)
+                    
                     text = (f"<b>{record.get('variant', 'N/A')}</b> ({record.get('family', 'N/A')})\n"
                             f"Time: {format_time(record.get('start_sec', 0))} – {format_time(record.get('end_sec', 0))}\n"
                             f"Dur: {format_time(record.get('duration', 0))}\n"
-                            f"{enc['x_axis']}: {x_val:.2f}\n"
-                            f"{enc['y_axis']}: {y_val:.2f}")
+                            f"{enc['x_axis']}: {x_formatted}\n"
+                            f"{enc['y_axis']}: {y_formatted}")
                     
                     figure._hover_annot.set_text(text)
                     figure._hover_annot.set_position((event.xdata, event.ydata))
@@ -762,8 +772,14 @@ class MainWindow(QMainWindow):
         sep.setStyleSheet("color: rgba(255,255,255,0.08); margin: 4px 0;")
         layout.addWidget(sep)
 
-        metrics_list = ["Width", "Depth", "Compactness", "Duration", "Center X", "Center Y", 
-                        "Elongation", "Centroid Displacement", "Centroid Velocity", "Confidence"]
+        # --- STAGE 4 UPDATE: Added EPV/DAS metrics to dropdowns ---
+        metrics_list = [
+            "Width", "Depth", "Compactness", "Duration", 
+            "Center X", "Center Y", "Elongation", 
+            "Centroid Displacement", "Centroid Velocity", "Confidence",
+            "Cumulative EPV", "Mean EPV", "EPV / min",
+            "DAS Count", "DAS / min"
+        ]
         
         self._2d_x_axis = make_combo("X-AXIS", metrics_list)
         self._2d_x_axis.setCurrentText("Width")
@@ -778,7 +794,7 @@ class MainWindow(QMainWindow):
         
         layout.addStretch()
         return container
-
+    
     def _match_id(self) -> str | None:
         match_id = self.top.match_id
         if not match_id:
