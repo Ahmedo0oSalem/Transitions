@@ -7,7 +7,9 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
+from matplotlib.lines import Line2D
 from ..io.paths import match_dir
+from ..analytics.formations.segments import _aggregate_obso_for_segment
 from ..analytics.formations.taxonomy import derive_hierarchy
 from .theme import FIG_FACE, TEXT_PRIMARY, LABEL_COLOR, TICK_COLOR, GRID
 
@@ -24,6 +26,10 @@ METRIC_COLS = {
     "Centroid Velocity": "mean_centroid_velocity",
     "Template Displacement": "mean_template_displacement",
     "Confidence": "mean_confidence",
+    "Pitch Control": "mean_home_control",
+    "Home Control": "mean_home_control",
+    "Away Control": "mean_away_control",
+    "OBSO": "mean_obso",
     "N Windows": "n_windows",
     "N Frames": "n_frames",
 }
@@ -58,6 +64,20 @@ def _ensure_hierarchy(df):
             df['family'] = 'other'
     return df
 
+
+def _resolve_metric_column(metric_label, team_filter):
+    """Resolve the metric column used for plotting, respecting team-specific pitch control."""
+    if metric_label == "Pitch Control":
+        if str(team_filter).lower() == "away":
+            return "mean_away_control"
+        return "mean_home_control"
+    if metric_label == "Home Control":
+        return "mean_home_control"
+    if metric_label == "Away Control":
+        return "mean_away_control"
+    return METRIC_COLS.get(metric_label, "mean_width")
+
+
 def plot_2d_analysis(match_id, processed_dir, filters, encodings):
     folder = match_dir(match_id, processed_dir)
     segments_path = folder / "formation_segments.csv"
@@ -67,6 +87,47 @@ def plot_2d_analysis(match_id, processed_dir, filters, encodings):
         
     df = pd.read_csv(segments_path)
     df = _ensure_hierarchy(df)
+
+    if "mean_obso" not in df.columns:
+        try:
+            from ..analytics.obso import compute_obso_for_match
+            obso_df = compute_obso_for_match(match_id, processed_dir)
+            if not obso_df.empty:
+                obso_values = []
+                for _, row in df.iterrows():
+                    props = _aggregate_obso_for_segment(
+                        obso_df,
+                        str(row.get("team", "")).strip().lower(),
+                        int(row.get("period", 0)),
+                        float(row.get("start_sec", row.get("windowStartSec", 0))),
+                        float(row.get("end_sec", row.get("windowEndSec", 0))),
+                    )
+                    obso_values.append(props.get("mean_obso", np.nan))
+                df["mean_obso"] = obso_values
+        except Exception:
+            pass
+
+    if ("mean_home_control" not in df.columns) or ("mean_away_control" not in df.columns):
+        try:
+            from ..analytics.pitch_control.control import compute_pitch_control_for_match
+            control_df = compute_pitch_control_for_match(match_id, processed_dir)
+            if not control_df.empty:
+                home_vals = []
+                away_vals = []
+                for _, row in df.iterrows():
+                    start = float(row.get("start_sec", row.get("windowStartSec", 0)))
+                    end = float(row.get("end_sec", row.get("windowEndSec", 0)))
+                    period = int(row.get("period", 0))
+                    mask = (control_df["period"] == period) & (control_df["elapsed"] >= start) & (control_df["elapsed"] < end)
+                    sub = control_df[mask]
+                    home_vals.append(float(sub["home_control"].mean()) if not sub.empty else np.nan)
+                    away_vals.append(float(sub["away_control"].mean()) if not sub.empty else np.nan)
+                if "mean_home_control" not in df.columns:
+                    df["mean_home_control"] = home_vals
+                if "mean_away_control" not in df.columns:
+                    df["mean_away_control"] = away_vals
+        except Exception:
+            pass
     
     # --- 1. Apply Filters ---
     if filters.get("team") != "All":
@@ -87,8 +148,11 @@ def plot_2d_analysis(match_id, processed_dir, filters, encodings):
         return fig
         
     # --- 2. Resolve Columns ---
-    x_col = METRIC_COLS.get(encodings["x_axis"], "mean_width")
-    y_col = METRIC_COLS.get(encodings["y_axis"], "mean_depth")
+    x_axis_label = encodings.get("x_axis", "Width")
+    y_axis_label = encodings.get("y_axis", "Depth")
+    x_col = _resolve_metric_column(x_axis_label, filters.get("team", "All"))
+    y_col = _resolve_metric_column(y_axis_label, filters.get("team", "All"))
+
     plot_df = df.dropna(subset=[x_col, y_col]).copy().reset_index(drop=True)
     plot_df['plot_id'] = range(len(plot_df)) # Unique ID for interaction
     
@@ -164,8 +228,16 @@ def plot_2d_analysis(match_id, processed_dir, filters, encodings):
             
         fig._scatter_map[sc] = plot_df['plot_id'].values
     
-    # Hide inline matplotlib legend (we use the PyQt6 button instead)
-    ax.legend().set_visible(False)
+    # Show the formation/shape legend when a categorical shape encoding is in use.
+    if shape_map:
+        legend_handles = [
+            Line2D([0], [0], linestyle='None', marker=marker, markersize=8,
+                   markerfacecolor='none', markeredgecolor='#eaf2ff', markeredgewidth=1.5)
+            for marker in shape_map.values()
+        ]
+        legend_labels = [str(label) for label in shape_map.keys()]
+        legend_title = "Formation" if shape_col_label == "Formation" else "Family"
+        ax.legend(legend_handles, legend_labels, title=legend_title, loc='best', frameon=False)
     
     # Colorbar only for continuous metrics
     if is_color_metric and cmap is not None:
@@ -176,9 +248,9 @@ def plot_2d_analysis(match_id, processed_dir, filters, encodings):
         cbar.ax.yaxis.set_tick_params(color=TICK_COLOR); cbar.outline.set_color(GRID)
     
     # Labels and Layout
-    ax.set_xlabel(encodings["x_axis"], color=LABEL_COLOR, fontsize=12)
-    ax.set_ylabel(encodings["y_axis"], color=LABEL_COLOR, fontsize=12)
-    ax.set_title(f"Formation Segments: {encodings['x_axis']} vs {encodings['y_axis']}", 
+    ax.set_xlabel(x_axis_label, color=LABEL_COLOR, fontsize=12)
+    ax.set_ylabel(y_axis_label, color=LABEL_COLOR, fontsize=12)
+    ax.set_title(f"Formation Segments: {x_axis_label} vs {y_axis_label}", 
                  color=TEXT_PRIMARY, fontsize=14, pad=15)
     ax.tick_params(colors=TICK_COLOR)
     for spine in ax.spines.values(): spine.set_color(GRID)
@@ -192,7 +264,7 @@ def plot_2d_analysis(match_id, processed_dir, filters, encodings):
     fig._legend_data = {
         'shape_categories': shape_categories if shape_categories else None,
         'color_metric': color_col_label if is_color_metric else None,
-        'title': f"{encodings['x_axis']} vs {encodings['y_axis']}"
+        'title': f"{x_axis_label} vs {y_axis_label}"
     }
     
     # Hover annotation

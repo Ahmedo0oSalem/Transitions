@@ -3,9 +3,11 @@
 import unittest
 
 import numpy as np
+import pandas as pd
 
 from Transitions.analytics.formations.detector import get_orientation
 from Transitions.analytics.formations.matching import match_formation
+from Transitions.analytics.formations.segments import _aggregate_obso_for_segment
 
 
 class FormationTests(unittest.TestCase):
@@ -29,6 +31,19 @@ class FormationTests(unittest.TestCase):
         self.assertEqual(formation, "test")
         self.assertEqual(names, ["A", "B"])
         self.assertAlmostEqual(cost, 0.0)
+
+    def test_aggregate_obso_for_segment_returns_team_mean(self) -> None:
+        obso_df = pd.DataFrame(
+            [
+                {"period": 1, "elapsed": 10, "team": "home", "obso": 0.4},
+                {"period": 1, "elapsed": 20, "team": "home", "obso": 0.8},
+                {"period": 1, "elapsed": 30, "team": "away", "obso": 1.0},
+            ]
+        )
+
+        props = _aggregate_obso_for_segment(obso_df, "home", 1, 0, 30)
+
+        self.assertEqual(props["mean_obso"], 0.6)
 
 
 if __name__ == "__main__":
