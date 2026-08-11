@@ -219,7 +219,8 @@ def run_analysis(match_id, processed_dir, epv_grid_path):
 	logger.info("Computing per-frame EPV...")
 	signed_epv = compute_frame_epv(periods, elapsed, ball_x, ball_y, smoothed,
 									epv_grid, pitch_length, pitch_width, home_dir_p1, away_dir_p1)
-	epv_df = bucket_epv_by_second(periods, elapsed, signed_epv)
+	valid_frames = ~np.isnan(ball_x) & ~np.isnan(ball_y) & (smoothed != 0)
+	epv_df = bucket_epv_by_second(periods, elapsed, signed_epv, valid=valid_frames)
 
 	logger.info("Evaluating Dangerous Attacking Sequences...")
 	das_df = evaluate_das(das_sequences_input, ball_x, ball_y, periods, elapsed, epv_grid,

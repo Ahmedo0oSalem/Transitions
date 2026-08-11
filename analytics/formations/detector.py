@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from ...core.config import (
+    AMBIGUOUS_MARGIN_M,
     FORMATION_MIN_FRAMES_PER_WINDOW,
     FORMATION_MIN_OUTFIELD_PLAYERS,
     FORMATION_STRIDE_SECONDS,
@@ -165,10 +166,13 @@ def process_match(match_id, processed_dir=PROCESSED_DIR, window_seconds=None, st
         spatial_metrics = compute_spatial_metrics(players, pitch_length, pitch_width)
         
         orientation = get_orientation(team, period, home_team_start_left)
-        formation, cost, _assigned_names = match_formation(avg_xy, templates, orientation)
+        formation, cost, _assigned_names, second_cost = match_formation(avg_xy, templates, orientation)
+        cost_margin = float(second_cost) - float(cost) if np.isfinite(second_cost) else 0.0
+        ambiguous = bool(cost_margin < AMBIGUOUS_MARGIN_M)
         
         fit_quality = 1.0 / (1.0 + float(cost))
-        confidence = window_weight_sum * fit_quality
+        mean_frame_weight = window_weight_sum / max(1, n_frames)
+        confidence = mean_frame_weight
         
         if events is not None and confidence < _MIN_CONF:
             logger.debug(
@@ -190,10 +194,14 @@ def process_match(match_id, processed_dir=PROCESSED_DIR, window_seconds=None, st
             "windowEndSec": window_end,
             "nOutfieldPlayers": avg_xy.shape[0],
             "nFrames": n_frames,
-            "formation": formation,
+            "formation": str(formation),
             "orientation": orientation,
             "avgCostPerPlayer": round(float(cost), 3),
+            "costMargin": round(cost_margin, 3),
+            "ambiguous": ambiguous,
+            "fitQuality": round(float(fit_quality), 4),
             "confidence": round(float(confidence), 4),
+            "rawWeightSum": round(float(window_weight_sum), 1),
         }
         
         if spatial_metrics:

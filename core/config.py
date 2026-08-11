@@ -26,6 +26,10 @@ FORMATION_MIN_FRAMES_PER_WINDOW = 30
 FORMATION_MIN_OUTFIELD_PLAYERS = 9
 FORMATION_GK_MIN_FRAMES = 3000
 
+# Windows whose best-vs-second-best template cost margin (metres per player)
+# falls below this are flagged as ambiguous: the label is not trustworthy.
+AMBIGUOUS_MARGIN_M = 0.75
+
 POSSESSION_THRESHOLD_M = 2.5
 POSSESSION_SMOOTH_WINDOW_SECONDS = 1.0
 POSSESSION_MIN_SEQUENCE_SECONDS = 2.0

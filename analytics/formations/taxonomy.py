@@ -70,9 +70,9 @@ def derive_hierarchy(raw_formation: str) -> dict[str, str]:
 
     Returns ``{"formation": …, "variant": …, "family": …}``.
     """
-    variant = raw_formation.removesuffix("flat")
+    variant = str(raw_formation).removesuffix("flat")
     family = infer_family(variant)
-    return {"formation": raw_formation, "variant": variant, "family": family}
+    return {"formation": str(raw_formation), "variant": variant, "family": family}
 
 
 # ====================================================================

@@ -42,17 +42,30 @@ def compute_frame_epv(periods, elapsed, ball_x, ball_y, owner_smoothed,
 	return signed_epv
 
 
-def bucket_epv_by_second(periods, elapsed, signed_epv):
-	"""Downsample per-frame signed EPV to one-second buckets."""
+def bucket_epv_by_second(periods, elapsed, signed_epv, valid=None):
+    """Downsample per-frame signed EPV to one-second buckets.
 
-	rows = []
-	for p in np.unique(periods):
-		mask = periods == p
-		e = elapsed[mask]
-		s = signed_epv[mask]
-		bucket = np.floor(e).astype(int)
-		for b in np.unique(bucket):
-			m = bucket == b
-			rows.append({"period": int(p), "secondIntoPeriod": int(b),
-						  "meanSignedEPV": float(np.mean(s[m]))})
-	return pd.DataFrame(rows)
+    Averages only frames flagged as *valid* (ball tracked + owner assigned).
+    Frames where the ball is missing or no owner exists contribute a forced
+    zero in ``signed_epv`` and would bias the per-second mean downward, so
+    they are excluded when *valid* is provided.  The number of valid frames
+    per bucket is reported in the ``nValidFrames`` column.
+    """
+    if valid is None:
+        valid = np.ones(len(signed_epv), dtype=bool)
+    rows = []
+    for p in np.unique(periods):
+        mask = periods == p
+        e = elapsed[mask]
+        s = signed_epv[mask]
+        v = valid[mask]
+        bucket = np.floor(e).astype(int)
+        for b in np.unique(bucket):
+            m = bucket == b
+            vm = m & v
+            rows.append({
+                "period": int(p), "secondIntoPeriod": int(b),
+                "meanSignedEPV": float(np.mean(s[vm])) if vm.any() else 0.0,
+                "nValidFrames": int(vm.sum()),
+            })
+    return pd.DataFrame(rows)

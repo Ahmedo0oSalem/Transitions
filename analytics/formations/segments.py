@@ -31,7 +31,19 @@ def load_possession_sequences(match_dir_path: Path) -> list[dict]:
 
 def calculate_possession_overlap(segment_start: float, segment_end: float, 
                                  sequences: list[dict], team: str, period: int) -> dict:
-    """Calculate exact in/out/loose ball seconds for a specific segment."""
+    """Calculate exact in/out/loose ball seconds for a specific segment.
+
+    When *sequences* is empty (no events.json for this match), possession
+    stats are unavailable: return NaN instead of fabricating a 100% loose
+    ball result.
+    """
+    if not sequences:
+        return {
+            "in_possession_sec": np.nan,
+            "out_of_possession_sec": np.nan,
+            "loose_ball_sec": np.nan,
+            "n_turnovers": 0,
+        }
     in_poss = 0.0
     out_poss = 0.0
     loose_ball = 0.0
@@ -211,6 +223,12 @@ def build_formation_segments(match_id: str | int, processed_dir: str) -> pd.Data
     
     possession_seqs = load_possession_sequences(match_dir_path)
     logger.info("[%s] loaded %s possession sequences.", match_id, len(possession_seqs))
+    if not possession_seqs:
+        logger.warning(
+            "[%s] no events.json -- possession columns will be NaN for all segments "
+            "(in/out/loose possession unavailable).",
+            match_id,
+        )
     
     # Load EPV, DAS, and OBSO data once
     epv_df = _load_epv_data(match_dir_path)
