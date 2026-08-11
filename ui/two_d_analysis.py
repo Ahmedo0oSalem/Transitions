@@ -207,15 +207,19 @@ def plot_2d_analysis(match_id, processed_dir, filters, encodings):
                 cat_cmap = plt.cm.tab10
                 color_lookup = {c: cat_cmap(i % 10) for i, c in enumerate(unique_cats)}
                 sub_colors = [color_lookup[v] for v in sub_df[cat_col]]
+            
+            # Distinguish Home vs Away by edge color
+            edge_colors = ['#ffffff' if t == 'home' else '#000000' for t in sub_df['team']]
                 
             sc = ax.scatter(sub_df[x_col], sub_df[y_col], c=sub_colors, cmap=cmap, norm=norm,
-                            marker=marker, s=80, alpha=0.7, edgecolors='white', linewidth=0.5, label=str(cat), zorder=3)
+                            marker=marker, s=80, alpha=0.7, edgecolors=edge_colors, linewidths=1.5, label=str(cat), zorder=3)
             fig._scatter_map[sc] = sub_df['plot_id'].values
     else:
         # No shape encoding, plot all at once
         if is_color_metric:
+            edge_colors = ['#ffffff' if t == 'home' else '#000000' for t in plot_df['team']]
             sc = ax.scatter(plot_df[x_col], plot_df[y_col], c=colors, cmap=cmap, norm=norm,
-                            marker='o', s=80, alpha=0.7, edgecolors='white', linewidth=0.5, zorder=3)
+                            marker='o', s=80, alpha=0.7, edgecolors=edge_colors, linewidths=1.5, zorder=3)
         else:
             # Categorical color without shapes
             cat_col = CAT_COLS.get(color_col_label, 'variant')
@@ -223,8 +227,9 @@ def plot_2d_analysis(match_id, processed_dir, filters, encodings):
             cat_cmap = plt.cm.tab10
             color_lookup = {c: cat_cmap(i % 10) for i, c in enumerate(unique_cats)}
             plot_colors = [color_lookup[v] for v in plot_df[cat_col]]
+            edge_colors = ['#ffffff' if t == 'home' else '#000000' for t in plot_df['team']]
             sc = ax.scatter(plot_df[x_col], plot_df[y_col], c=plot_colors,
-                            marker='o', s=80, alpha=0.7, edgecolors='white', linewidth=0.5, zorder=3)
+                            marker='o', s=80, alpha=0.7, edgecolors=edge_colors, linewidths=1.5, zorder=3)
             
         fig._scatter_map[sc] = plot_df['plot_id'].values
     
