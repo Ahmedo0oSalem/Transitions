@@ -9,58 +9,34 @@ from pathlib import Path
 from typing import Callable
 from PyQt6.QtCore import Qt, QObject, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
-    QApplication,
-    QComboBox,
-    QDoubleSpinBox,
-    QFileDialog,
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMessageBox,
-    QProgressBar,
-    QPushButton,
-    QSizePolicy,
-    QSpinBox,
-    QTabWidget,
-    QTextEdit,
-    QToolButton,
-    QVBoxLayout,
-    QWidget,
+    QApplication, QComboBox, QDoubleSpinBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
+    QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
+    QSizePolicy, QSpinBox, QTabWidget, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from ..io.paths import EPV_GRID_PATH, PROCESSED_DIR, RAW_TRACKING_DIR
 from ..pipeline import runner
 from . import timeline, viewer
 from .theme import GlassCard, apply_glass_shadow, wrap_in_glass
+from .two_d_analysis import format_time, METRIC_COLS
+import pandas as pd
 
 # =====================================================================
 # Helpers
 # =====================================================================
 
 class _SignalWriter(io.TextIOBase):
-    """Redirect print output from long-running jobs into the UI log."""
     def __init__(self, callback: Callable[[str], None]) -> None:
         super().__init__()
         self._callback = callback
-
     def write(self, text: str) -> int:
-        if text:
-            self._callback(text.rstrip())
+        if text: self._callback(text.rstrip())
         return len(text)
-
-    def flush(self) -> None:
-        return None
+    def flush(self) -> None: return None
 
 class Worker(QObject):
-    """Runs a callable in a background thread.
-    Pipeline steps can report progress by printing lines like::
-         PROGRESS: 50 Training model...
-    Values: -1 = indeterminate, 0-100 = determinate.
-    """
     log = pyqtSignal(str)
-    progress = pyqtSignal(int, str)  # value, message
+    progress = pyqtSignal(int, str)
     finished = pyqtSignal(str, object)
     failed = pyqtSignal(str)
     _PROGRESS_RE = re.compile(r"^PROGRESS:\s*(-?\d+)\s*(.*)$")
@@ -72,8 +48,7 @@ class Worker(QObject):
 
     def _on_output(self, text: str) -> None:
         m = self._PROGRESS_RE.match(text)
-        if m:
-            self.progress.emit(int(m.group(1)), m.group(2).strip())
+        if m: self.progress.emit(int(m.group(1)), m.group(2).strip())
         self.log.emit(text)
 
     def run(self) -> None:
@@ -87,46 +62,225 @@ class Worker(QObject):
         except Exception:
             self.failed.emit(traceback.format_exc())
 
+class LegendPopup(QDialog):
+    """Popup dialog to display the plot legend."""
+    def __init__(self, parent=None, title="Legend", shape_categories=None, color_metric=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Legend - {title}")
+        self.setMinimumSize(400, 500)
+        
+        layout = QVBoxLayout(self)
+        title_label = QLabel(f"<b>{title}</b>")
+        title_label.setStyleSheet("font-size: 14px; font-weight: bold;")
+        layout.addWidget(title_label)
+        
+        if shape_categories:
+            shape_label = QLabel("<b>Formation (Shape):</b>")
+            layout.addWidget(shape_label)
+            shape_list = QListWidget()
+            for cat in shape_categories:
+                shape_list.addItem(str(cat))
+            layout.addWidget(shape_list)
+            
+        if color_metric:
+            color_label = QLabel(f"<b>Color: {color_metric}</b>")
+            layout.addWidget(color_label)
+            color_info = QLabel("Continuous color scale (viridis colormap)")
+            color_info.setStyleSheet("color: #8a9aaa;")
+            layout.addWidget(color_info)
+            
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+
 class FigureTab(QWidget):
-    """Widget hosting a matplotlib figure + navigation toolbar."""
+    """Widget hosting a matplotlib figure + navigation toolbar + details panel."""
     def __init__(self, title: str, figure) -> None:
         super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        
+        # Left side: Plot container
+        plot_container = QWidget()
+        plot_layout = QVBoxLayout(plot_container)
+        plot_layout.setContentsMargins(0, 0, 0, 0)
+        
         canvas = figure.canvas
         if not isinstance(canvas, FigureCanvasQTAgg):
             canvas = FigureCanvasQTAgg(figure)
         canvas.setParent(self)
-        canvas.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
+        canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        
+        # Toolbar row with Show Legend button
+        toolbar_row = QHBoxLayout()
         toolbar = NavigationToolbar2QT(canvas, self)
-        layout.addWidget(toolbar)
-        layout.addWidget(canvas, 1)
+        toolbar_row.addWidget(toolbar, 1)
+        
+        # Add Show Legend button if data exists
+        if hasattr(figure, '_legend_data'):
+            legend_btn = QPushButton("📋 Show Legend")
+            legend_btn.setObjectName("runButton")
+            legend_btn.setMinimumHeight(28)
+            legend_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            legend_btn.clicked.connect(lambda: self._show_legend_popup(figure))
+            toolbar_row.addWidget(legend_btn)
+            
+        plot_layout.addLayout(toolbar_row)
+        plot_layout.addWidget(canvas, 1)
         canvas.draw_idle()
         self.canvas = canvas
         self.title = title
+        
+        main_layout.addWidget(plot_container, 3)
+        
+        # Right side: Details Panel
+        self.details_panel = QTextEdit()
+        self.details_panel.setReadOnly(True)
+        self.details_panel.setMinimumWidth(250)
+        self.details_panel.setMaximumWidth(350)
+        self.details_panel.setStyleSheet(f"""
+            QTextEdit {{
+                background: rgba(0, 0, 0, 0.22);
+                border: 1px solid #2a3a4a;
+                border-radius: 9px;
+                padding: 10px;
+                color: #e0e0e0;
+                font-family: "Segoe UI", sans-serif;
+                font-size: 12px;
+            }}
+        """)
+        self.details_panel.setHtml("<b>Segment Details</b><br><br>Hover or click a point to see details.")
+        main_layout.addWidget(self.details_panel, 1)
+        
+        # --- Interaction Handlers ---
+        self._setup_interactions(figure)
+
+    def _show_legend_popup(self, figure):
+        """Open a modal popup with legend information."""
+        data = figure._legend_data
+        popup = LegendPopup(
+            self,
+            title=data['title'],
+            shape_categories=data['shape_categories'],
+            color_metric=data['color_metric']
+        )
+        popup.exec()
+
+    def _setup_interactions(self, figure):
+        if not hasattr(figure, '_segment_records'):
+            return
+            
+        canvas = self.canvas
+        
+        def on_hover(event):
+            if event.inaxes != figure.axes[0]:
+                figure._hover_annot.set_visible(False)
+                canvas.draw_idle()
+                return
+                
+            for sc, ids in figure._scatter_map.items():
+                cont, ind = sc.contains(event)
+                if cont:
+                    idx = ind['ind'][0]
+                    plot_id = ids[idx]
+                    record = figure._segment_records[plot_id]
+                    
+                    # Update annotation text
+                    enc = figure._encodings
+                    x_val = record.get(METRIC_COLS.get(enc['x_axis'], ''), 'N/A')
+                    y_val = record.get(METRIC_COLS.get(enc['y_axis'], ''), 'N/A')
+                    
+                    text = (f"<b>{record.get('variant', 'N/A')}</b> ({record.get('family', 'N/A')})\n"
+                            f"Time: {format_time(record.get('start_sec', 0))} – {format_time(record.get('end_sec', 0))}\n"
+                            f"Dur: {format_time(record.get('duration', 0))}\n"
+                            f"{enc['x_axis']}: {x_val:.2f}\n"
+                            f"{enc['y_axis']}: {y_val:.2f}")
+                    
+                    figure._hover_annot.set_text(text)
+                    figure._hover_annot.set_position((event.xdata, event.ydata))
+                    figure._hover_annot.set_visible(True)
+                    canvas.draw_idle()
+                    return
+                    
+            figure._hover_annot.set_visible(False)
+            canvas.draw_idle()
+
+        def on_click(event):
+            if event.inaxes != figure.axes[0] or event.button != 1:
+                return
+                
+            for sc, ids in figure._scatter_map.items():
+                cont, ind = sc.contains(event)
+                if cont:
+                    idx = ind['ind'][0]
+                    plot_id = ids[idx]
+                    record = figure._segment_records[plot_id]
+                    
+                    # Highlight point
+                    figure._selection_ring.set_offsets([[record[METRIC_COLS.get(figure._encodings['x_axis'], 'mean_width')], 
+                                                         record[METRIC_COLS.get(figure._encodings['y_axis'], 'mean_depth')]]])
+                    canvas.draw_idle()
+                    
+                    # Update details panel
+                    self._update_details_panel(record)
+                    return
+
+        canvas.mpl_connect('motion_notify_event', on_hover)
+        canvas.mpl_connect('button_press_event', on_click)
+
+    def _update_details_panel(self, record):
+        def fmt(val, decimals=2):
+            if val is None or (isinstance(val, float) and pd.isna(val)): return "N/A"
+            return f"{val:.{decimals}f}"
+            
+        html = f"""
+        <h3 style="color: #2b8a3e; margin-bottom: 10px;">Segment Details</h3>
+        <table style="width: 100%; border-collapse: collapse;">
+            <tr><td style="color: #8a9aaa; padding: 4px;">Formation:</td><td style="font-weight: bold; padding: 4px;">{record.get('variant', 'N/A')}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Family:</td><td style="padding: 4px;">{record.get('family', 'N/A')}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Team:</td><td style="padding: 4px;">{record.get('team', 'N/A').capitalize()}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Period:</td><td style="padding: 4px;">{record.get('period', 'N/A')}</td></tr>
+            <tr><td colspan="2" style="border-top: 1px solid #2a3a4a; margin: 5px 0;"></td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Start:</td><td style="padding: 4px;">{format_time(record.get('start_sec', 0))}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">End:</td><td style="padding: 4px;">{format_time(record.get('end_sec', 0))}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Duration:</td><td style="padding: 4px;">{format_time(record.get('duration', 0))}</td></tr>
+            <tr><td colspan="2" style="border-top: 1px solid #2a3a4a; margin: 5px 0;"></td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">In Possession:</td><td style="padding: 4px;">{fmt(record.get('in_possession_sec', 0), 1)}s</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Out of Possession:</td><td style="padding: 4px;">{fmt(record.get('out_of_possession_sec', 0), 1)}s</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Loose Ball:</td><td style="padding: 4px;">{fmt(record.get('loose_ball_sec', 0), 1)}s</td></tr>
+            <tr><td colspan="2" style="border-top: 1px solid #2a3a4a; margin: 5px 0;"></td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Mean Width:</td><td style="padding: 4px;">{fmt(record.get('mean_width'))} m</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Mean Depth:</td><td style="padding: 4px;">{fmt(record.get('mean_depth'))} m</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Mean Compactness:</td><td style="padding: 4px;">{fmt(record.get('mean_compactness'))} m</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Mean Center X:</td><td style="padding: 4px;">{fmt(record.get('mean_center_x'))}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Mean Center Y:</td><td style="padding: 4px;">{fmt(record.get('mean_center_y'))}</td></tr>
+            <tr><td colspan="2" style="border-top: 1px solid #2a3a4a; margin: 5px 0;"></td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Centroid Velocity:</td><td style="padding: 4px;">{fmt(record.get('mean_centroid_velocity'))} m/s</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Template Displacement:</td><td style="padding: 4px;">{fmt(record.get('mean_template_displacement'))} m</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Mean Confidence:</td><td style="padding: 4px;">{fmt(record.get('mean_confidence'), 4)}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Min Confidence:</td><td style="padding: 4px;">{fmt(record.get('min_confidence'), 4)}</td></tr>
+            <tr><td colspan="2" style="border-top: 1px solid #2a3a4a; margin: 5px 0;"></td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">N Windows:</td><td style="padding: 4px;">{record.get('n_windows', 'N/A')}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">N Frames:</td><td style="padding: 4px;">{record.get('n_frames', 'N/A')}</td></tr>
+        </table>
+        """
+        self.details_panel.setHtml(html)
 
 # =====================================================================
 # Accordion Sidebar
 # =====================================================================
 
 class AccordionSidebar(QWidget):
-    """Collapsible sidebar: each nav item has a header button and a
-    hidden drawer (description + run button). Only one drawer is open
-    at a time.
-    """
-    # Added "2D Analysis" at index 7, shifted Viewer to index 8
     SECTIONS: list[tuple[str, str, str]] = [
         ("Home",              "Run the full pipeline, or execute individual steps below.", "▸ Run Full Pipeline"),
-        ("Preprocess",        "Process raw tracking data into structured JSONL + metadata.", "▸ Run Preprocess"),
+        ("Preprocess",        "Process raw tracking data into structured JSONL + metadata.", " Run Preprocess"),
         ("Formations",        "Detect team formations from player positions using template matching.", "▸ Detect Formations"),
         ("EPV + DAS",         "Compute Expected Possession Value and Dangerous Action Sequences.", "▸ Run EPV + DAS"),
         ("Pitch Control",     "Compute pitch control per formation window.", "▸ Compute Pitch Control"),
-        ("OBSO",              "Compute Off-Ball Scoring Opportunity per formation window.", " Compute OBSO"),
-        ("Timeline",          "Plot formation changes over the match.", "▸ Show Timeline"),
-        ("2D Analysis",       "Tactical analysis of formation segments in 2D space.", " Run 2D Analysis"),
-        ("Viewer",            "Interactive match viewer with scrubbable slider and playback controls.", "▸ Open Match Viewer"),
+        ("OBSO",              "Compute Off-Ball Scoring Opportunity per formation window.", "▸ Compute OBSO"),
+        ("Timeline",          "Plot formation changes over the match.", " Show Timeline"),
+        ("2D Analysis",       "Tactical analysis of formation segments in 2D space.", "▸ Run 2D Analysis"),
+        ("Viewer",            "Interactive match viewer with scrubbable slider and playback controls.", " Open Match Viewer"),
     ]
 
     def __init__(self, callbacks: list[Callable[[], None]], parent: QWidget | None = None) -> None:
@@ -138,7 +292,6 @@ class AccordionSidebar(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # -- App title --
         title = QLabel("TRANSITIONS")
         title.setStyleSheet(
             "font-size: 16px; font-weight: 800; padding: 16px 14px 10px 14px;"
@@ -148,7 +301,6 @@ class AccordionSidebar(QWidget):
         )
         layout.addWidget(title)
 
-        # -- Separator --
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color: rgba(255,255,255,0.08); margin: 0 10px;")
@@ -165,7 +317,6 @@ class AccordionSidebar(QWidget):
             })
         layout.addStretch()
 
-    # ---- section building ----
     def _build_section(self, label: str, desc: str,
                        btn_text: str, idx: int) -> tuple[QPushButton, QWidget]:
         header = QPushButton(label)
@@ -214,14 +365,12 @@ class AccordionSidebar(QWidget):
         target = self._sections[idx]
         target["is_open"] = not target["is_open"]
         target["body"].setVisible(target["is_open"])
-        # Close all other sections
         for i, sec in enumerate(self._sections):
             if i != idx and sec["is_open"]:
                 sec["is_open"] = False
                 sec["body"].setVisible(False)
 
     def set_enabled(self, enabled: bool) -> None:
-        """Enable or disable all interactive elements."""
         for sec in self._sections:
             sec["header"].setEnabled(enabled)
             for child in sec["body"].findChildren(QPushButton):
@@ -232,14 +381,12 @@ class AccordionSidebar(QWidget):
 # =====================================================================
 
 class TopBar(QWidget):
-    """Always-visible bar: match selector, paths, shared parameters."""
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(10)
 
-        # ---- Row 1: Match ID + numeric params ----
         row1 = QHBoxLayout()
         row1.setSpacing(8)
         self.match_label = QLabel("MATCH ID")
@@ -284,7 +431,6 @@ class TopBar(QWidget):
         row1.addWidget(self.speed_spin)
         row1.addStretch()
 
-        # ---- Row 2: Path fields ----
         row2 = QHBoxLayout()
         row2.setSpacing(8)
         self.processed_edit = QLineEdit(str(PROCESSED_DIR))
@@ -317,7 +463,6 @@ class TopBar(QWidget):
         self.processed_edit.textChanged.connect(lambda _: self.refresh_matches())
         self.refresh_matches()
 
-    # ---- helpers ----
     def _browse_btn(self, parent_layout: QHBoxLayout, line_edit: QLineEdit, directory: bool) -> None:
         btn = QToolButton()
         btn.setText("…")
@@ -334,7 +479,6 @@ class TopBar(QWidget):
             line_edit.setText(selected)
 
     def refresh_matches(self) -> None:
-        """Scan *processed-dir* for subdirectories with metadata.json."""
         current = self.match_combo.currentText().strip()
         self.match_combo.clear()
         try:
@@ -348,7 +492,6 @@ class TopBar(QWidget):
         if current:
             self.match_combo.setCurrentText(current)
 
-    # ---- read-only properties used by run methods ----
     @property
     def match_id(self) -> str:
         return self.match_combo.currentText().strip()
@@ -383,7 +526,6 @@ class TopBar(QWidget):
 # =====================================================================
 
 class LogPanel(QWidget):
-    """Bottom panel: progress bar + scrollable log output."""
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -476,8 +618,6 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # ---- Left accordion sidebar ----
-        # Note: 2D Analysis is at index 7, Viewer is at index 8
         self.sidebar = AccordionSidebar(callbacks=[
              self.run_full_pipeline,
              self.run_preprocess,
@@ -486,12 +626,11 @@ class MainWindow(QMainWindow):
              self.run_pitch_control,
              self.run_obso,
              self.run_timeline,
-             self.run_2d_analysis,  # New
+             self.run_2d_analysis,
              self.run_viewer,
         ])
         main_layout.addWidget(self.sidebar)
 
-        # ---- Timeline controls (inserted into the Timeline drawer at index 6) ----
         self._timeline_method = QComboBox()
         self._timeline_method.addItems(["Single line", "Piano roll"])
         self._timeline_method.setMinimumHeight(28)
@@ -506,47 +645,41 @@ class MainWindow(QMainWindow):
         timeline_body.layout().insertWidget(1, self._timeline_method)
         timeline_body.layout().insertWidget(2, self._timeline_granularity)
 
-        # ---- 2D Analysis controls (inserted into the 2D Analysis drawer at index 7) ----
         self._2d_controls = self._build_2d_controls()
         analysis_body = self.sidebar._sections[7]["body"]
         analysis_body.layout().insertWidget(1, self._2d_controls)
 
-        # ---- Vertical separator ----
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
         main_layout.addWidget(sep)
 
-        # ---- Right content area (maximised for plots) ----
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(14, 14, 14, 10)
         content_layout.setSpacing(12)
 
-        # Top bar, wrapped in a glass card
         self.top = TopBar()
         content_layout.addWidget(wrap_in_glass(self.top, outer_margins=0))
 
-        # Results tabs (plots) — takes all remaining space
         self.tabs = QTabWidget()
         self.tabs.addTab(self._empty_tab(), "Results")
         tabs_card = wrap_in_glass(self.tabs, outer_margins=0)
         content_layout.addWidget(tabs_card, 1)
 
-        # Log panel, wrapped in a glass card
         self.log_panel = LogPanel()
         content_layout.addWidget(wrap_in_glass(self.log_panel, outer_margins=0))
 
         main_layout.addWidget(content, 1)
         self.statusBar().showMessage("Ready")
 
-        # Track match ID in status bar
         self._match_label = QLabel("")
         self._match_label.setObjectName("statusMatch")
         self.statusBar().addPermanentWidget(self._match_label)
         self.top.match_combo.currentTextChanged.connect(self._update_match_status)
+        # Connect match change to update formation dropdown
+        self.top.match_combo.currentTextChanged.connect(self._update_formation_dropdown)
         self._update_match_status(self.top.match_id)
 
-    # ---- empty tab placeholder ----
     def _empty_tab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -556,9 +689,40 @@ class MainWindow(QMainWindow):
         layout.addWidget(label)
         return tab
 
-    # ---- 2D Analysis UI Builder ----
+    def _update_formation_dropdown(self, match_id: str) -> None:
+        """Populate the Formation dropdown based on the selected match's segments."""
+        if not match_id:
+            self._2d_formation.clear()
+            self._2d_formation.addItem("All")
+            return
+            
+        try:
+            folder = Path(self.top.processed_dir) / str(match_id)
+            segments_path = folder / "formation_segments.csv"
+            
+            if segments_path.is_file():
+                df = pd.read_csv(segments_path)
+                # Clean variant names just like in two_d_analysis
+                if 'variant' in df.columns:
+                    variants = df['variant'].astype(str).apply(lambda x: x.split('\n')[0].strip()).unique()
+                    variants = sorted([v for v in variants if v])
+                else:
+                    variants = []
+                    
+                self._2d_formation.blockSignals(True)
+                self._2d_formation.clear()
+                self._2d_formation.addItem("All")
+                self._2d_formation.addItems(variants)
+                self._2d_formation.blockSignals(False)
+            else:
+                self._2d_formation.clear()
+                self._2d_formation.addItem("All")
+        except Exception:
+            # Fallback if reading fails
+            self._2d_formation.clear()
+            self._2d_formation.addItem("All")
+
     def _build_2d_controls(self) -> QWidget:
-        """Builds the filter and encoding dropdowns for the 2D Analysis tab."""
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -588,7 +752,6 @@ class MainWindow(QMainWindow):
             layout.addWidget(spin)
             return spin
 
-        # --- Filters ---
         self._2d_team = make_combo("TEAM", ["All", "Home", "Away"])
         self._2d_period = make_combo("PERIOD", ["All", "1", "2"])
         self._2d_formation = make_combo("FORMATION", ["All"])
@@ -599,7 +762,6 @@ class MainWindow(QMainWindow):
         sep.setStyleSheet("color: rgba(255,255,255,0.08); margin: 4px 0;")
         layout.addWidget(sep)
 
-        # --- Visual Encodings ---
         metrics_list = ["Width", "Depth", "Compactness", "Duration", "Center X", "Center Y", 
                         "Elongation", "Centroid Displacement", "Centroid Velocity", "Confidence"]
         
@@ -617,7 +779,6 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         return container
 
-    # ---- helpers ----
     def _match_id(self) -> str | None:
         match_id = self.top.match_id
         if not match_id:
@@ -698,88 +859,53 @@ class MainWindow(QMainWindow):
             self.tabs.addTab(FigureTab(title, figure), title)
             self.tabs.setCurrentIndex(self.tabs.count() - 1)
 
-    # ---- obso and pitch control run methods ----
     def run_pitch_control(self) -> None:
         match_id = self._match_id()
-        if match_id is None:
-            return
+        if match_id is None: return
         from ..pipeline.runner import pitch_control_figure
         import matplotlib.pyplot as plt
         plt.switch_backend("Agg")
-        fig, df = pitch_control_figure(
-            match_id,
-            processed_dir=self.top.processed_dir,
-        )
+        fig, df = pitch_control_figure(match_id, processed_dir=self.top.processed_dir)
         self._show_result("Pitch Control", fig)
 
     def run_obso(self) -> None:
         match_id = self._match_id()
-        if match_id is None:
-            return
+        if match_id is None: return
         from ..pipeline.runner import obso_figure
         import matplotlib.pyplot as plt
         plt.switch_backend("Agg")
-        fig, df = obso_figure(
-           match_id,
-           processed_dir=self.top.processed_dir,
-           epv_grid_path=self.top.epv_grid,
-        )
+        fig, df = obso_figure(match_id, processed_dir=self.top.processed_dir, epv_grid_path=self.top.epv_grid)
         self._show_result("OBSO", fig)
 
-    # ---- run methods ----
     def run_preprocess(self) -> None:
         match_id = self.top.match_id or None
         raw_dir = self.top.raw_dir or None
-        self._start_worker(
-            "Preprocess",
-            lambda: runner.preprocess_all_matches(match_id=match_id,
-                                                  raw_tracking_dir=raw_dir),
-        )
+        self._start_worker("Preprocess", lambda: runner.preprocess_all_matches(match_id=match_id, raw_tracking_dir=raw_dir))
 
     def run_formations(self) -> None:
         match_id = self._match_id()
-        if match_id is None:
-            return
-        self._start_worker(
-            "Formations",
-            lambda: runner.detect_formations(
-                [match_id],
-                processed_dir=self.top.processed_dir,
-                window_seconds=self.top.window_seconds,
-                stride_seconds=self.top.stride_seconds,
-            ),
-        )
+        if match_id is None: return
+        self._start_worker("Formations", lambda: runner.detect_formations([match_id], processed_dir=self.top.processed_dir, window_seconds=self.top.window_seconds, stride_seconds=self.top.stride_seconds))
 
     def run_epv(self) -> None:
         match_id = self._match_id()
-        if match_id is None:
-            return
-        self._start_worker(
-            "EPV + DAS",
-            lambda: runner.run_epv(match_id, self.top.processed_dir,
-                                   self.top.epv_grid),
-        )
+        if match_id is None: return
+        self._start_worker("EPV + DAS", lambda: runner.run_epv(match_id, self.top.processed_dir, self.top.epv_grid))
 
     def run_timeline(self) -> None:
         match_id = self._match_id()
-        if match_id is None:
-            return
+        if match_id is None: return
         import matplotlib.pyplot as plt
         method = "voted" if self._timeline_method.currentIndex() == 0 else "all_formations"
         granularity = "variant" if self._timeline_granularity.currentIndex() == 0 else "family"
         plt.switch_backend("QtAgg")
-        timeline.plot_formation_timeline(
-            match_id, self.top.processed_dir,
-            method=method, granularity=granularity,
-        )
+        timeline.plot_formation_timeline(match_id, self.top.processed_dir, method=method, granularity=granularity)
         plt.show(block=False)
 
     def run_2d_analysis(self) -> None:
-        """Stage 2: Generate the 2D scatter plot."""
         match_id = self._match_id()
-        if match_id is None:
-            return
-            
+        if match_id is None: return
+        
         import matplotlib.pyplot as plt
         plt.switch_backend("QtAgg")
         
@@ -809,22 +935,14 @@ class MainWindow(QMainWindow):
 
     def run_viewer(self) -> None:
         match_id = self._match_id()
-        if match_id is None:
-            return
+        if match_id is None: return
         import matplotlib.pyplot as plt
         plt.switch_backend("QtAgg")
-        viewer.run_app(
-            match_id,
-            self.top.processed_dir,
-            self.top.speed,
-            show=True,
-            block=False,
-        )
+        viewer.run_app(match_id, self.top.processed_dir, self.top.speed, show=True, block=False)
 
     def run_full_pipeline(self) -> None:
         match_id = self._match_id()
-        if match_id is None:
-            return
+        if match_id is None: return
         processed_dir = self.top.processed_dir
         raw_dir = self.top.raw_dir or None
         epv_grid = self.top.epv_grid
@@ -832,14 +950,8 @@ class MainWindow(QMainWindow):
         stride_seconds = self.top.stride_seconds
 
         def _run() -> tuple:
-            runner.preprocess_all_matches(match_id=match_id,
-                                          raw_tracking_dir=raw_dir)
-            runner.detect_formations(
-                [match_id],
-                processed_dir=processed_dir,
-                window_seconds=window_seconds,
-                stride_seconds=stride_seconds,
-            )
+            runner.preprocess_all_matches(match_id=match_id, raw_tracking_dir=raw_dir)
+            runner.detect_formations([match_id], processed_dir=processed_dir, window_seconds=window_seconds, stride_seconds=stride_seconds)
             epv_figures = runner.run_epv(match_id, processed_dir, epv_grid)
             timeline_figure = runner.run_timeline(match_id, processed_dir)
             return (*epv_figures, timeline_figure)
