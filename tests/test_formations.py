@@ -45,6 +45,16 @@ class FormationTests(unittest.TestCase):
 
         self.assertEqual(props["mean_obso"], 0.6)
 
+    def test_2d_team_filter_normalizes_home_and_away(self) -> None:
+        from Transitions.ui.two_d_analysis import _normalize_team_filter, _normalize_team_x_for_plot
+
+        self.assertEqual(_normalize_team_filter("Home"), "home")
+        self.assertEqual(_normalize_team_filter("Away"), "away")
+        self.assertEqual(_normalize_team_filter("All"), "all")
+        self.assertEqual(_normalize_team_filter(" home "), "home")
+        self.assertEqual(_normalize_team_x_for_plot(20.0, "away", 1, True, 105.0), 85.0)
+        self.assertEqual(_normalize_team_x_for_plot(20.0, "home", 1, False, 105.0), 85.0)
+
 
 if __name__ == "__main__":
     unittest.main()

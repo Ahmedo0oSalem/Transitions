@@ -108,9 +108,17 @@ def compute_pitch_control_frame(home_positions, away_positions, ball_xy,
     
     return {"home_control": home_frac, "away_control": away_frac, "grid": None}
 
-def compute_pitch_control_for_match(match_id, processed_dir, downsample=1):
-    """Compute pitch control for every frame (or downsampled) using Voronoi fallback."""
+def compute_pitch_control_for_match(match_id, processed_dir, downsample=1, force_recompute=False):
+    """Compute pitch control for every frame (or downsampled) using Voronoi fallback.
+
+    Reuses a cached CSV if it already exists unless a fresh recomputation is forced.
+    """
     match_dir_path = match_dir(match_id, processed_dir)
+    cache_path = match_dir_path / "pitch_control_frames.csv"
+    if cache_path.is_file() and not force_recompute:
+        logger.info("Loading cached pitch control data from %s", cache_path)
+        return pd.read_csv(cache_path)
+
     metadata_path = match_dir_path / "metadata.json"
     tracking_path = match_dir_path / "tracking.jsonl.bz2"
     
@@ -179,6 +187,10 @@ def compute_pitch_control_for_match(match_id, processed_dir, downsample=1):
             })
     
     df = pd.DataFrame(records)
+    if not df.empty:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(cache_path, index=False)
+        logger.info("Saved pitch control cache to %s", cache_path)
     logger.info("Computed pitch control for %d frames", len(df))
     return df
     

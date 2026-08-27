@@ -65,11 +65,73 @@ def _ensure_hierarchy(df):
     return df
 
 
+def _normalize_team_filter(team_value):
+    """Normalize 2D-analysis team filter values from the UI to the CSV format."""
+    if team_value is None:
+        return "all"
+    normalized = str(team_value).strip().lower()
+    if normalized in {"all", ""}:
+        return "all"
+    if normalized in {"home", "away"}:
+        return normalized
+    return normalized
+
+
+def _normalize_team_x_for_plot(x_value, team, period, home_team_start_left, pitch_length):
+    """Mirror x-values for a single-team plot so team-only views use the correct field orientation."""
+    if x_value is None or pd.isna(x_value):
+        return x_value
+
+    home_attacks_left_to_right = home_team_start_left if period % 2 == 1 else not home_team_start_left
+    team_attacks_left_to_right = home_attacks_left_to_right if team == "home" else not home_attacks_left_to_right
+
+    if not team_attacks_left_to_right:
+        return pitch_length - float(x_value)
+    return float(x_value)
+
+
+def _apply_team_orientation_to_position_columns(plot_df, team_filter, metadata_path):
+    """Mirror x-position metrics for a single-team view to keep the chart aligned to the pitch."""
+    if team_filter == "all" or metadata_path is None or not metadata_path.is_file():
+        return plot_df
+
+    import json
+    with open(metadata_path, "r", encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    # metadata.json may be stored as a single object OR a list containing one object
+    if isinstance(metadata, list):
+        metadata = metadata[0] if metadata else {}
+
+    # Pitch length lives at stadium.pitches[0].length, not a top-level "pitch" key
+    pitches = metadata.get("stadium", {}).get("pitches", [])
+    if pitches:
+        pitch_length = float(pitches[0].get("length", 105.0))
+    else:
+        pitch_length = 105.0
+
+    home_team_start_left = bool(metadata.get("homeTeamStartLeft", True))
+    x_cols = ["mean_center_x", "std_center_x", "range_center_x"]
+
+    for x_col in x_cols:
+        if x_col not in plot_df.columns:
+            continue
+        plot_df[x_col] = plot_df.apply(
+            lambda row: _normalize_team_x_for_plot(
+                row[x_col], team_filter,
+                int(row.get("period", 1)),
+                home_team_start_left,
+                pitch_length,
+            ),
+            axis=1,
+        )
+    return plot_df
+
+
 def _resolve_metric_column(metric_label, team_filter):
-    """Resolve the metric column used for plotting, respecting team-specific pitch control."""
+    """Resolve the metric column used for plotting. Always uses the same column
+    regardless of team filter, so switching Team doesn't shift point positions."""
     if metric_label == "Pitch Control":
-        if str(team_filter).lower() == "away":
-            return "mean_away_control"
         return "mean_home_control"
     if metric_label == "Home Control":
         return "mean_home_control"
@@ -130,8 +192,10 @@ def plot_2d_analysis(match_id, processed_dir, filters, encodings):
             pass
     
     # --- 1. Apply Filters ---
-    if filters.get("team") != "All":
-        df = df[df["team"] == filters["team"].lower()]
+    team_filter = _normalize_team_filter(filters.get("team", "All"))
+    if team_filter != "all":
+        team_values = df["team"].astype(str).str.strip().str.lower()
+        df = df[team_values == team_filter].copy()
     if filters.get("period") != "All":
         df = df[df["period"] == int(filters["period"])]
     if filters.get("formation") != "All":
@@ -154,6 +218,11 @@ def plot_2d_analysis(match_id, processed_dir, filters, encodings):
     y_col = _resolve_metric_column(y_axis_label, filters.get("team", "All"))
 
     plot_df = df.dropna(subset=[x_col, y_col]).copy().reset_index(drop=True)
+
+    team_filter = _normalize_team_filter(filters.get("team", "All"))
+    if team_filter != "all":
+        plot_df = _apply_team_orientation_to_position_columns(plot_df, team_filter, folder / "metadata.json")
+
     plot_df['plot_id'] = range(len(plot_df)) # Unique ID for interaction
     
     # --- 3. Setup Figure ---

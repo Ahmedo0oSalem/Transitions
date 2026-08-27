@@ -14,9 +14,11 @@ from ...analytics.possession.tracking import stream_ball_and_owner, smooth_owner
 logger = get_logger(__name__)
 
 
-def compute_obso_for_match(match_id, processed_dir, epv_grid_path=None, radius=5.0, downsample=1):
+def compute_obso_for_match(match_id, processed_dir, epv_grid_path=None, radius=5.0, downsample=1, force_recompute=False):
     """
     Compute Off-Ball Scoring Opportunity (OBSO) for each frame.
+
+    Reuses a cached CSV if it already exists unless a fresh recomputation is forced.
 
     OBSO is the maximum EPV within a radius around the ball location,
     representing the best scoring opportunity available in the vicinity.
@@ -37,6 +39,11 @@ def compute_obso_for_match(match_id, processed_dir, epv_grid_path=None, radius=5
         epv_grid_path = EPV_GRID_PATH
 
     match_dir_path = match_dir(match_id, processed_dir)
+    cache_path = match_dir_path / "obso_frames.csv"
+    if cache_path.is_file() and not force_recompute:
+        logger.info("Loading cached OBSO data from %s", cache_path)
+        return pd.read_csv(cache_path)
+
     metadata_path = match_dir_path / "metadata.json"
     tracking_path = match_dir_path / "tracking.jsonl.bz2"
 
@@ -120,6 +127,9 @@ def compute_obso_for_match(match_id, processed_dir, epv_grid_path=None, radius=5
 
     df = pd.DataFrame(records)
     if not df.empty:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(cache_path, index=False)
+        logger.info("Saved OBSO cache to %s", cache_path)
         logger.info("OBSO team counts: %s", df["team"].value_counts().to_dict())
     logger.info("Computed OBSO for %d frames (radius=%.1f m)", len(df), radius)
     return df
