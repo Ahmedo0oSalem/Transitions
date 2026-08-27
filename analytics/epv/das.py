@@ -76,19 +76,48 @@ def evaluate_das(sequences, ball_x, ball_y, periods, elapsed, epv_grid, pitch_le
 
 
 def compute_period_offsets(metadata):
-	"""Convert per-period timestamps into a continuous match timeline."""
-
-	periods_meta = metadata.get("periods", {}) or {}
-	offsets, boundaries = {}, []
-	cursor = 0.0
-	for p_str in sorted(periods_meta.keys(), key=int):
-		p = int(p_str)
-		entry = periods_meta[p_str]
-		offsets[p] = cursor
-		length = float(entry["end"]) - float(entry["start"])
-		cursor += length
-		boundaries.append((cursor, p))
-	return offsets, boundaries, cursor
+    """Convert per-period timestamps into a continuous match timeline.
+    
+    Handles:
+    - Null/missing metadata (falls back to standard period lengths)
+    - Extra time (periods 3 and 4)
+    - Any number of periods
+    """
+    periods_meta = metadata.get("periods", {}) or {}
+    offsets, boundaries = {}, []
+    cursor = 0.0
+    
+    # Standard period lengths in seconds
+    STANDARD_LENGTHS = {
+        1: 2700,  # 45 min
+        2: 2700,  # 45 min
+        3: 900,   # 15 min (extra time 1st half)
+        4: 900,   # 15 min (extra time 2nd half)
+    }
+    
+    for p_str in sorted(periods_meta.keys(), key=int):
+        p = int(p_str)
+        entry = periods_meta[p_str]
+        offsets[p] = cursor
+        
+        # Safely get start and end times
+        start_val = entry.get("start") if entry else None
+        end_val = entry.get("end") if entry else None
+        
+        if start_val is not None and end_val is not None:
+            length = float(end_val) - float(start_val)
+        else:
+            # Use standard length or 2700s as default
+            length = STANDARD_LENGTHS.get(p, 2700)
+            logger.warning(
+                "Period %s has null metadata, using standard length %ss",
+                p, length
+            )
+        
+        cursor += length
+        boundaries.append((cursor, p))
+    
+    return offsets, boundaries, cursor
 
 
 def format_mmss(seconds, _pos=None):
