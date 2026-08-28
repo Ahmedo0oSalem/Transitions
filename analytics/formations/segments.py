@@ -284,7 +284,28 @@ def _finalize_segment(match_id, team, period, formation, start, end, df, possess
     epv_props = _aggregate_epv_for_segment(epv_df, team, period, start, end)
     das_props = _aggregate_das_for_segment(das_df, team, period, start, end)
     obso_props = _aggregate_obso_for_segment(obso_df, team, period, start, end)
-    
+
+        # DEBUG: Check if EPV/DAS data exists and overlaps
+    if epv_df is not None and not epv_df.empty:
+        epv_overlap = epv_df[
+            (epv_df["period"] == period) &
+            (epv_df["secondIntoPeriod"] >= start) &
+            (epv_df["secondIntoPeriod"] < end)
+        ]
+        logger.info(f"[{match_id}] Segment {team} P{period} {formation} [{start:.0f}-{end:.0f}s]: "
+                    f"EPV rows found: {len(epv_overlap)}")
+        
+    if das_df is not None and not das_df.empty:
+        das_overlap = das_df[
+            (das_df["team"] == team) &
+            (das_df["period"] == period) &
+            (das_df["isDAS"] == True) &
+            (das_df["startSec"] < end) &
+            (das_df["endSec"] > start)
+        ]
+        logger.info(f"[{match_id}] Segment {team} P{period} {formation} [{start:.0f}-{end:.0f}s]: "
+                    f"DAS events found: {len(das_overlap)}")
+        
     return {
         "matchId": match_id,
         "team": team,

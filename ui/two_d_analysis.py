@@ -32,6 +32,11 @@ METRIC_COLS = {
     "OBSO": "mean_obso",
     "N Windows": "n_windows",
     "N Frames": "n_frames",
+    "Cumulative EPV": "cumulative_epv",
+    "Mean EPV": "mean_epv",
+    "EPV / min": "epv_per_min",
+    "DAS Count": "das_count",
+    "DAS / min": "das_per_min",
 }
 
 CAT_COLS = {
