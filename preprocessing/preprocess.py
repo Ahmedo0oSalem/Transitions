@@ -1,7 +1,7 @@
-﻿import json
+﻿"""Preprocessing pipeline for raw tracking, event, and metadata files."""
+import json
 import bz2
 from pathlib import Path
-
 from ..io.paths import (
     PROCESSED_DIR,
     RAW_EVENTS_DIR,
@@ -28,9 +28,7 @@ TRACKING_FIELDS = [
 ]
 
 # Rename fields in the output
-FIELD_RENAME = {
-    
-}
+FIELD_RENAME = {}
 
 # Which metadata fields to keep
 METADATA_FIELDS = [
@@ -143,8 +141,8 @@ def process_roster(match_id, home_team_id, away_team_id):
 # ==========================
 # Metadata
 # ==========================
-def process_metadata(match_id):
 
+def process_metadata(match_id):
     metadata_path = find_match_file(RAW_METADATA_DIR, match_id, ".json")
     if metadata_path is None:
         print(f"Metadata missing: {match_id}")
@@ -164,39 +162,26 @@ def process_metadata(match_id):
     periods = {}
 
     for key, value in metadata.items():
-
         if key.startswith("startPeriod"):
-
             period = key.replace("startPeriod", "")
-
             periods[period] = {
                 "start": value,
                 "end": metadata.get(f"endPeriod{period}")
             }
 
     output = {
-
         "matchId": int(metadata["id"]),
-
         "competition": metadata["competition"]["name"],
-
         "date": metadata["date"],
-
         "trackingType": "smoothed",
-
         "fps": metadata["fps"],
-
         "pitch": {
             "length": metadata["stadium"]["pitches"][0]["length"],
             "width": metadata["stadium"]["pitches"][0]["width"]
         },
-
         "homeTeam": metadata["homeTeam"],
-
         "awayTeam": metadata["awayTeam"],
-
         "homeTeamStartLeft": metadata["homeTeamStartLeft"],
-
         "periods": periods
     }
 
@@ -358,7 +343,6 @@ def process_events(match_id, periods_meta=None):
 
     print(f"    wrote {len(records)} events ({skipped_non_events} flagged "
           f"nonEvent) -> {events_path}  [source: {RAW_EVENTS_DIR}]")
-
     return records
 
 
@@ -424,22 +408,36 @@ def _add_period_elapsed_estimates(events, periods_meta):
     periodElapsedTime-comparable value, using
     metadata["periods"][period]["start"] as that period's zero point.
 
-    This is a TIMESTAMP DIFFERENCE (event.startTime - period.start),
-    which is valid regardless of what "zero" means in the raw clock --
-    same reasoning already validated for period-length calculations in
-    plot_formation_timeline.py. Skips events whose period has no
-    metadata entry (leaves periodElapsedTimeEstimate out) rather than
-    guessing.
+    FIX: When metadata has null start/end values (e.g., PFF data with
+    missing period timestamps), falls back to using startTime directly
+    as the period-relative elapsed time. This ensures possession
+    sequences can still be built even when period metadata is incomplete.
     """
     if not periods_meta:
         return
+
+    # Check if ANY period has valid start metadata
+    has_valid_starts = any(
+        entry.get("start") is not None
+        for entry in periods_meta.values()
+        if entry is not None
+    )
+
     for r in events:
         meta_entry = periods_meta.get(str(r.get("period")))
-        if not meta_entry or meta_entry.get("start") is None:
-            continue
         if r.get("startTime") is None:
             continue
-        r["periodElapsedTimeEstimate"] = round(float(r["startTime"]) - float(meta_entry["start"]), 3)
+
+        if has_valid_starts and meta_entry and meta_entry.get("start") is not None:
+            # Normal case: subtract period start offset
+            r["periodElapsedTimeEstimate"] = round(
+                float(r["startTime"]) - float(meta_entry["start"]), 3
+            )
+        else:
+            # Fallback: use startTime directly as period-relative time
+            # This works when periods are numbered sequentially and
+            # startTime is already relative to each period's start
+            r["periodElapsedTimeEstimate"] = round(float(r["startTime"]), 3)
 
 
 def process_tracking(match_id, periods_meta=None, extract_embedded_events=True):

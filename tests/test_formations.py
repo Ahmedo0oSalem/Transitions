@@ -3,9 +3,11 @@
 import unittest
 
 import numpy as np
+import pandas as pd
 
 from Transitions.analytics.formations.detector import get_orientation
 from Transitions.analytics.formations.matching import match_formation
+from Transitions.analytics.formations.segments import _aggregate_obso_for_segment
 
 
 class FormationTests(unittest.TestCase):
@@ -29,6 +31,29 @@ class FormationTests(unittest.TestCase):
         self.assertEqual(formation, "test")
         self.assertEqual(names, ["A", "B"])
         self.assertAlmostEqual(cost, 0.0)
+
+    def test_aggregate_obso_for_segment_returns_team_mean(self) -> None:
+        obso_df = pd.DataFrame(
+            [
+                {"period": 1, "elapsed": 10, "team": "home", "obso": 0.4},
+                {"period": 1, "elapsed": 20, "team": "home", "obso": 0.8},
+                {"period": 1, "elapsed": 30, "team": "away", "obso": 1.0},
+            ]
+        )
+
+        props = _aggregate_obso_for_segment(obso_df, "home", 1, 0, 30)
+
+        self.assertEqual(props["mean_obso"], 0.6)
+
+    def test_2d_team_filter_normalizes_home_and_away(self) -> None:
+        from Transitions.ui.two_d_analysis import _normalize_team_filter, _normalize_team_x_for_plot
+
+        self.assertEqual(_normalize_team_filter("Home"), "home")
+        self.assertEqual(_normalize_team_filter("Away"), "away")
+        self.assertEqual(_normalize_team_filter("All"), "all")
+        self.assertEqual(_normalize_team_filter(" home "), "home")
+        self.assertEqual(_normalize_team_x_for_plot(20.0, "away", 1, True, 105.0), 85.0)
+        self.assertEqual(_normalize_team_x_for_plot(20.0, "home", 1, False, 105.0), 85.0)
 
 
 if __name__ == "__main__":

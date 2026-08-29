@@ -777,6 +777,8 @@ class MainWindow(QMainWindow):
             "Width", "Depth", "Compactness", "Duration", 
             "Center X", "Center Y", "Elongation", 
             "Centroid Displacement", "Centroid Velocity", "Confidence",
+            "Pitch Control", "Home Control", "Away Control",
+            "OBSO",
             "Cumulative EPV", "Mean EPV", "EPV / min",
             "DAS Count", "DAS / min"
         ]

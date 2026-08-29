@@ -212,9 +212,15 @@ def build_formation_segments(match_id: str | int, processed_dir: str) -> pd.Data
     possession_seqs = load_possession_sequences(match_dir_path)
     logger.info("[%s] loaded %s possession sequences.", match_id, len(possession_seqs))
     
-    # Load EPV and DAS data once
+    # Load EPV, DAS, and OBSO data once
     epv_df = _load_epv_data(match_dir_path)
     das_df = _load_das_data(match_dir_path)
+    try:
+        from ..obso import compute_obso_for_match
+        obso_df = compute_obso_for_match(match_id, processed_dir)
+    except Exception as exc:
+        logger.warning("[%s] failed to compute OBSO for segments: %s", match_id, exc)
+        obso_df = pd.DataFrame()
     
     segments = []
     for (team, period), grp in df.groupby(["team", "period"], sort=False):
@@ -231,13 +237,13 @@ def build_formation_segments(match_id: str | int, processed_dir: str) -> pd.Data
                 seg_end = end
             else:
                 if current_formation is not None:
-                    seg_data = _finalize_segment(match_id, team, period, current_formation, seg_start, seg_end, df, possession_seqs, epv_df, das_df)
+                    seg_data = _finalize_segment(match_id, team, period, current_formation, seg_start, seg_end, df, possession_seqs, epv_df, das_df, obso_df)
                     segments.append(seg_data)
                 current_formation = formation
                 seg_start = start
                 seg_end = end
         if current_formation is not None:
-            seg_data = _finalize_segment(match_id, team, period, current_formation, seg_start, seg_end, df, possession_seqs, epv_df, das_df)
+            seg_data = _finalize_segment(match_id, team, period, current_formation, seg_start, seg_end, df, possession_seqs, epv_df, das_df, obso_df)
             segments.append(seg_data)
     segments_df = pd.DataFrame(segments)
     out_path = match_dir_path / "formation_segments.csv"
@@ -245,7 +251,27 @@ def build_formation_segments(match_id: str | int, processed_dir: str) -> pd.Data
     logger.info("[%s] wrote %s continuous segments -> %s", match_id, len(segments_df), out_path)
     return segments_df
 
-def _finalize_segment(match_id, team, period, formation, start, end, df, possession_seqs, epv_df=None, das_df=None):
+def _aggregate_obso_for_segment(obso_df: pd.DataFrame | None, team: str, period: int,
+                                 start_sec: float, end_sec: float) -> dict:
+    """Aggregate OBSO values within a segment's time window for one team."""
+    if obso_df is None or obso_df.empty:
+        return {"mean_obso": np.nan}
+
+    sub = obso_df[
+        (obso_df["period"] == period) &
+        (obso_df["elapsed"] >= start_sec) &
+        (obso_df["elapsed"] < end_sec) &
+        (obso_df["team"] == team)
+    ]
+
+    if sub.empty:
+        return {"mean_obso": np.nan}
+
+    return {"mean_obso": round(float(sub["obso"].mean()), 4)}
+
+
+def _finalize_segment(match_id, team, period, formation, start, end, df, possession_seqs,
+                      epv_df=None, das_df=None, obso_df=None):
     """Helper to build a single segment dictionary."""
     segment_windows = df[(df["team"] == team) & (df["period"] == period) & 
                          (df["windowStartSec"] < end) & (df["windowEndSec"] > start)]
@@ -254,10 +280,32 @@ def _finalize_segment(match_id, team, period, formation, start, end, df, possess
     poss_props = calculate_possession_overlap(start, end, possession_seqs, team, period)
     spatial_props = aggregate_spatial_metrics(segment_windows, start, end)
     
-    # Aggregate EPV and DAS
+    # Aggregate EPV, DAS, and OBSO
     epv_props = _aggregate_epv_for_segment(epv_df, team, period, start, end)
     das_props = _aggregate_das_for_segment(das_df, team, period, start, end)
-    
+    obso_props = _aggregate_obso_for_segment(obso_df, team, period, start, end)
+
+        # DEBUG: Check if EPV/DAS data exists and overlaps
+    if epv_df is not None and not epv_df.empty:
+        epv_overlap = epv_df[
+            (epv_df["period"] == period) &
+            (epv_df["secondIntoPeriod"] >= start) &
+            (epv_df["secondIntoPeriod"] < end)
+        ]
+        logger.info(f"[{match_id}] Segment {team} P{period} {formation} [{start:.0f}-{end:.0f}s]: "
+                    f"EPV rows found: {len(epv_overlap)}")
+        
+    if das_df is not None and not das_df.empty:
+        das_overlap = das_df[
+            (das_df["team"] == team) &
+            (das_df["period"] == period) &
+            (das_df["isDAS"] == True) &
+            (das_df["startSec"] < end) &
+            (das_df["endSec"] > start)
+        ]
+        logger.info(f"[{match_id}] Segment {team} P{period} {formation} [{start:.0f}-{end:.0f}s]: "
+                    f"DAS events found: {len(das_overlap)}")
+        
     return {
         "matchId": match_id,
         "team": team,
@@ -271,5 +319,6 @@ def _finalize_segment(match_id, team, period, formation, start, end, df, possess
         **poss_props,
         **spatial_props,
         **epv_props,
-        **das_props
+        **das_props,
+        **obso_props
     }
