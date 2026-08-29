@@ -812,7 +812,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(label if running else "Ready")
         self.log_panel.show_progress(running)
 
-    def _start_worker(self, label: str, callback: Callable[[], object]) -> None:
+    def _start_worker(self, label: str, callback: Callable[[], object],
+                      on_finished: Callable[[str, object], None] | None = None) -> None:
         if self._thread is not None:
             return
         self.log_panel.append(f"> {label}")
@@ -823,7 +824,8 @@ class MainWindow(QMainWindow):
         self._thread.started.connect(self._worker.run)
         self._worker.log.connect(self.log_panel.append)
         self._worker.progress.connect(self._on_progress)
-        self._worker.finished.connect(self._job_finished)
+        finished_handler = on_finished if on_finished is not None else self._job_finished
+        self._worker.finished.connect(finished_handler)
         self._worker.failed.connect(self._job_failed)
         self._worker.finished.connect(self._thread.quit)
         self._worker.failed.connect(self._thread.quit)
@@ -923,33 +925,52 @@ class MainWindow(QMainWindow):
     def run_2d_analysis(self) -> None:
         match_id = self._match_id()
         if match_id is None: return
-        
-        import matplotlib.pyplot as plt
-        plt.switch_backend("QtAgg")
-        
-        from .two_d_analysis import plot_2d_analysis
-        
+
+        from ..pipeline import runner
+
         filters = {
             "team": self._2d_team.currentText(),
             "period": self._2d_period.currentText(),
             "formation": self._2d_formation.currentText(),
             "min_duration": self._2d_min_duration.value(),
         }
-        
+
         encodings = {
             "x_axis": self._2d_x_axis.currentText(),
             "y_axis": self._2d_y_axis.currentText(),
             "color": self._2d_color.currentText(),
             "shape": self._2d_shape.currentText(),
         }
-        
-        try:
-            fig = plot_2d_analysis(match_id, self.top.processed_dir, filters, encodings)
-            self._show_result("2D Analysis", fig)
-        except Exception as e:
-            import traceback
-            self.log_panel.append(traceback.format_exc())
-            QMessageBox.critical(self, "2D Analysis Failed", str(e))
+
+        def _compute() -> object:
+            return runner.prepare_2d_segments(
+                match_id,
+                self.top.processed_dir,
+                self.top.epv_grid,
+            )
+
+        def _finish(label: str, result: object) -> None:
+            try:
+                from .two_d_analysis import plot_2d_analysis
+                import matplotlib.pyplot as plt
+                import pandas as pd
+                plt.switch_backend("QtAgg")
+                df = result if isinstance(result, pd.DataFrame) else None
+                fig = plot_2d_analysis(
+                    match_id,
+                    self.top.processed_dir,
+                    filters,
+                    encodings,
+                    precomputed_segments=df,
+                )
+                self._show_result("2D Analysis", fig)
+            except Exception:
+                import traceback
+                details = traceback.format_exc()
+                self.log_panel.append(details)
+                QMessageBox.critical(self, "2D Analysis Failed", details)
+
+        self._start_worker("2D Analysis", _compute, on_finished=_finish)
 
     def run_viewer(self) -> None:
         match_id = self._match_id()

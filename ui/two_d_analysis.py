@@ -145,56 +145,59 @@ def _resolve_metric_column(metric_label, team_filter):
     return METRIC_COLS.get(metric_label, "mean_width")
 
 
-def plot_2d_analysis(match_id, processed_dir, filters, encodings):
+def plot_2d_analysis(match_id, processed_dir, filters, encodings, precomputed_segments=None):
     folder = match_dir(match_id, processed_dir)
     segments_path = folder / "formation_segments.csv"
     
-    if not segments_path.is_file():
-        raise FileNotFoundError(f"formation_segments.csv not found for match {match_id}.")
-        
-    df = pd.read_csv(segments_path)
+    if precomputed_segments is not None:
+        df = precomputed_segments.copy()
+    else:
+        if not segments_path.is_file():
+            raise FileNotFoundError(f"formation_segments.csv not found for match {match_id}.")
+        df = pd.read_csv(segments_path)
     df = _ensure_hierarchy(df)
 
-    if "mean_obso" not in df.columns:
-        try:
-            from ..analytics.obso import compute_obso_for_match
-            obso_df = compute_obso_for_match(match_id, processed_dir)
-            if not obso_df.empty:
-                obso_values = []
-                for _, row in df.iterrows():
-                    props = _aggregate_obso_for_segment(
-                        obso_df,
-                        str(row.get("team", "")).strip().lower(),
-                        int(row.get("period", 0)),
-                        float(row.get("start_sec", row.get("windowStartSec", 0))),
-                        float(row.get("end_sec", row.get("windowEndSec", 0))),
-                    )
-                    obso_values.append(props.get("mean_obso", np.nan))
-                df["mean_obso"] = obso_values
-        except Exception:
-            pass
+    if precomputed_segments is None:
+        if "mean_obso" not in df.columns:
+            try:
+                from ..analytics.obso import compute_obso_for_match
+                obso_df = compute_obso_for_match(match_id, processed_dir)
+                if not obso_df.empty:
+                    obso_values = []
+                    for _, row in df.iterrows():
+                        props = _aggregate_obso_for_segment(
+                            obso_df,
+                            str(row.get("team", "")).strip().lower(),
+                            int(row.get("period", 0)),
+                            float(row.get("start_sec", row.get("windowStartSec", 0))),
+                            float(row.get("end_sec", row.get("windowEndSec", 0))),
+                        )
+                        obso_values.append(props.get("mean_obso", np.nan))
+                    df["mean_obso"] = obso_values
+            except Exception:
+                pass
 
-    if ("mean_home_control" not in df.columns) or ("mean_away_control" not in df.columns):
-        try:
-            from ..analytics.pitch_control.control import compute_pitch_control_for_match
-            control_df = compute_pitch_control_for_match(match_id, processed_dir)
-            if not control_df.empty:
-                home_vals = []
-                away_vals = []
-                for _, row in df.iterrows():
-                    start = float(row.get("start_sec", row.get("windowStartSec", 0)))
-                    end = float(row.get("end_sec", row.get("windowEndSec", 0)))
-                    period = int(row.get("period", 0))
-                    mask = (control_df["period"] == period) & (control_df["elapsed"] >= start) & (control_df["elapsed"] < end)
-                    sub = control_df[mask]
-                    home_vals.append(float(sub["home_control"].mean()) if not sub.empty else np.nan)
-                    away_vals.append(float(sub["away_control"].mean()) if not sub.empty else np.nan)
-                if "mean_home_control" not in df.columns:
-                    df["mean_home_control"] = home_vals
-                if "mean_away_control" not in df.columns:
-                    df["mean_away_control"] = away_vals
-        except Exception:
-            pass
+        if ("mean_home_control" not in df.columns) or ("mean_away_control" not in df.columns):
+            try:
+                from ..analytics.pitch_control.control import compute_pitch_control_for_match
+                control_df = compute_pitch_control_for_match(match_id, processed_dir)
+                if not control_df.empty:
+                    home_vals = []
+                    away_vals = []
+                    for _, row in df.iterrows():
+                        start = float(row.get("start_sec", row.get("windowStartSec", 0)))
+                        end = float(row.get("end_sec", row.get("windowEndSec", 0)))
+                        period = int(row.get("period", 0))
+                        mask = (control_df["period"] == period) & (control_df["elapsed"] >= start) & (control_df["elapsed"] < end)
+                        sub = control_df[mask]
+                        home_vals.append(float(sub["home_control"].mean()) if not sub.empty else np.nan)
+                        away_vals.append(float(sub["away_control"].mean()) if not sub.empty else np.nan)
+                    if "mean_home_control" not in df.columns:
+                        df["mean_home_control"] = home_vals
+                    if "mean_away_control" not in df.columns:
+                        df["mean_away_control"] = away_vals
+            except Exception:
+                pass
     
     # --- 1. Apply Filters ---
     team_filter = _normalize_team_filter(filters.get("team", "All"))

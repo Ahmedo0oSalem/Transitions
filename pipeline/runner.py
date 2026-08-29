@@ -132,6 +132,82 @@ def compute_obso_artifact(match_id, processed_dir, epv_grid_path=None, radius=5.
     return {"frame": frame_df, "window": window_df}
 
 
+def prepare_2d_segments(match_id, processed_dir, epv_grid_path=None):
+    """Load formation segments and enrich with OBSO / pitch-control columns.
+
+    Intended to run in a background worker (expensive). Returns the DataFrame,
+    NOT a figure, so the caller can build the interactive plot on the GUI thread.
+    Both enrichment paths reuse the existing per-frame CSV caches, so a second
+    call for the same match is fast.
+
+    Returns
+    -------
+    pd.DataFrame with (at least) mean_obso, mean_home_control, mean_away_control
+    added when the corresponding analytic artifacts are available.
+    """
+    folder = match_dir(match_id, processed_dir)
+    segments_path = folder / "formation_segments.csv"
+
+    if not segments_path.is_file():
+        raise FileNotFoundError(f"formation_segments.csv not found for match {match_id}.")
+
+    df = pd.read_csv(segments_path)
+
+    if df.empty:
+        return df
+
+    start_key = "start_sec" if "start_sec" in df.columns else "windowStartSec"
+    end_key = "end_sec" if "end_sec" in df.columns else "windowEndSec"
+
+    if "mean_obso" not in df.columns:
+        try:
+            from ..analytics.obso import compute_obso_for_match
+            from ..analytics.formations.segments import _aggregate_obso_for_segment
+            obso_df = compute_obso_for_match(match_id, processed_dir, epv_grid_path)
+            if not obso_df.empty:
+                obso_values = []
+                for _, row in df.iterrows():
+                    props = _aggregate_obso_for_segment(
+                        obso_df,
+                        str(row.get("team", "")).strip().lower(),
+                        int(row.get("period", 0)),
+                        float(row.get(start_key, 0.0)),
+                        float(row.get(end_key, 0.0)),
+                    )
+                    obso_values.append(props.get("mean_obso", np.nan))
+                df["mean_obso"] = obso_values
+        except Exception:
+            pass
+
+    if ("mean_home_control" not in df.columns) or ("mean_away_control" not in df.columns):
+        try:
+            result = compute_pitch_control_artifact(match_id, processed_dir, downsample=1)
+            frame_df = result.frame_control
+            if frame_df is not None and not frame_df.empty:
+                home_vals = []
+                away_vals = []
+                for _, row in df.iterrows():
+                    period = int(row.get("period", 0))
+                    start = float(row.get(start_key, 0.0))
+                    end = float(row.get(end_key, 0.0))
+                    mask = (
+                        (frame_df["period"] == period) &
+                        (frame_df["elapsed"] >= start) &
+                        (frame_df["elapsed"] < end)
+                    )
+                    sub = frame_df[mask]
+                    home_vals.append(float(sub["home_control"].mean()) if not sub.empty else np.nan)
+                    away_vals.append(float(sub["away_control"].mean()) if not sub.empty else np.nan)
+                if "mean_home_control" not in df.columns:
+                    df["mean_home_control"] = home_vals
+                if "mean_away_control" not in df.columns:
+                    df["mean_away_control"] = away_vals
+        except Exception:
+            pass
+
+    return df
+
+
 def _df_to_table_figure(df, title, metric_col='mean_home_control'):
     """Create a grouped bar chart (home vs away) per formation window."""
     if df.empty:
