@@ -1195,6 +1195,19 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(comparison_widget, "2D Comparison")
         self.tabs.setCurrentIndex(self.tabs.count() - 1)
         
+        # Flatten any tuples within each graph's output while preserving labels
+        expanded_results = []
+        for label, fig_or_tuple in figures_with_labels:
+            if isinstance(fig_or_tuple, tuple):
+                for i, f in enumerate(fig_or_tuple):
+                    expanded_results.append((f"{label} - {i+1}", f))
+            else:
+                expanded_results.append((label, fig_or_tuple))
+        
+        comparison_widget = ComparisonView(expanded_results, self)
+        self.tabs.addTab(comparison_widget, "2D Comparison")
+        self.tabs.setCurrentIndex(self.tabs.count() - 1)
+
     def run_viewer(self) -> None:
         match_id = self._match_id()
         if match_id is None: return

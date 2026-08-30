@@ -2,10 +2,7 @@
 2D Tactical Analysis visualization.
 Loads formation_segments.csv and plots one point per segment.
 Stage 3: Enhanced interactions, legends, and metadata attachment.
-Stage 4: Integrated EPV/DAS metrics.
-Stage 5: Graph Control UI + Split by Team Visualization.
-Stage 6: Axis Range Configuration Integration.
-FIXED: Safe metric loading + preserved Graph/Range controls.
+Stage 6+7: Shared Range Infrastructure & Pre-filtered Data Support.
 """
 import pandas as pd
 import numpy as np
@@ -161,104 +158,128 @@ def _get_team_names(match_id, processed_dir):
         pass
     return home_name, away_name
 
-def plot_2d_analysis(match_id, processed_dir, filters, encodings):
+def plot_2d_analysis(match_id, processed_dir, filters, encodings, pre_filtered_df=None):
+    """
+    Plot 2D tactical analysis with support for shared axis ranges.
+    
+    Args:
+        match_id: Match identifier
+        processed_dir: Path to processed data directory
+        filters: Dict containing team, period, formation, min_duration
+        encodings: Dict containing axis metrics, color, shape, range modes
+        pre_filtered_df: Optional pre-filtered DataFrame (for shared range optimization)
+    """
     folder = match_dir(match_id, processed_dir)
     segments_path = folder / "formation_segments.csv"
     
-    if not segments_path.is_file():
-        raise FileNotFoundError(f"formation_segments.csv not found for match {match_id}.")
+    # --- Load & Prepare Data ---
+    if pre_filtered_df is not None:
+        # Use pre-filtered data provided by main_window for shared range computation
+        plot_df = pre_filtered_df.copy()
+        plot_df['plot_id'] = range(len(plot_df))
         
-    df = pd.read_csv(segments_path)
-    df = _ensure_hierarchy(df)
-    
-    # --- FIX: Load missing heavy metrics BEFORE filtering/dropping NaN ---
-    if "mean_obso" not in df.columns:
-        try:
-            from ..analytics.obso import compute_obso_for_match
-            obso_df = compute_obso_for_match(match_id, processed_dir)
-            if not obso_df.empty:
-                obso_values = []
-                for _, row in df.iterrows():
-                    props = _aggregate_obso_for_segment(
-                        obso_df,
-                        str(row.get("team", "")).strip().lower(),
-                        int(row.get("period", 0)),
-                        float(row.get("start_sec", row.get("windowStartSec", 0))),
-                        float(row.get("end_sec", row.get("windowEndSec", 0))),
-                    )
-                    obso_values.append(props.get("mean_obso", np.nan))
-                df["mean_obso"] = obso_values
-        except Exception:
-            pass
+        # Still need to resolve columns for plotting
+        team_filter = _normalize_team_filter(filters.get("team", "All"))
+        x_axis_label = encodings.get("x_axis", "Width")
+        y_axis_label = encodings.get("y_axis", "Depth")
+        x_col = _resolve_metric_column(x_axis_label, team_filter)
+        y_col = _resolve_metric_column(y_axis_label, team_filter)
+    else:
+        # Original loading path for backward compatibility / single graph mode
+        if not segments_path.is_file():
+            raise FileNotFoundError(f"formation_segments.csv not found for match {match_id}.")
+            
+        df = pd.read_csv(segments_path)
+        df = _ensure_hierarchy(df)
+        
+        # Load missing heavy metrics BEFORE filtering
+        if "mean_obso" not in df.columns:
+            try:
+                from ..analytics.obso import compute_obso_for_match
+                obso_df = compute_obso_for_match(match_id, processed_dir)
+                if not obso_df.empty:
+                    obso_values = []
+                    for _, row in df.iterrows():
+                        props = _aggregate_obso_for_segment(
+                            obso_df,
+                            str(row.get("team", "")).strip().lower(),
+                            int(row.get("period", 0)),
+                            float(row.get("start_sec", row.get("windowStartSec", 0))),
+                            float(row.get("end_sec", row.get("windowEndSec", 0))),
+                        )
+                        obso_values.append(props.get("mean_obso", np.nan))
+                    df["mean_obso"] = obso_values
+            except Exception:
+                pass
 
-    if ("mean_home_control" not in df.columns) or ("mean_away_control" not in df.columns):
-        try:
-            from ..analytics.pitch_control.control import compute_pitch_control_for_match
-            control_df = compute_pitch_control_for_match(match_id, processed_dir)
-            if not control_df.empty:
-                home_vals = []
-                away_vals = []
-                for _, row in df.iterrows():
-                    start = float(row.get("start_sec", row.get("windowStartSec", 0)))
-                    end = float(row.get("end_sec", row.get("windowEndSec", 0)))
-                    period = int(row.get("period", 0))
-                    mask = (control_df["period"] == period) & (control_df["elapsed"] >= start) & (control_df["elapsed"] < end)
-                    sub = control_df[mask]
-                    home_vals.append(float(sub["home_control"].mean()) if not sub.empty else np.nan)
-                    away_vals.append(float(sub["away_control"].mean()) if not sub.empty else np.nan)
-                if "mean_home_control" not in df.columns:
-                    df["mean_home_control"] = home_vals
-                if "mean_away_control" not in df.columns:
-                    df["mean_away_control"] = away_vals
-        except Exception:
-            pass
-    # ---------------------------------------------------------
-    
-    # --- Handle Graph Mode ---
+        if ("mean_home_control" not in df.columns) or ("mean_away_control" not in df.columns):
+            try:
+                from ..analytics.pitch_control.control import compute_pitch_control_for_match
+                control_df = compute_pitch_control_for_match(match_id, processed_dir)
+                if not control_df.empty:
+                    home_vals = []
+                    away_vals = []
+                    for _, row in df.iterrows():
+                        start = float(row.get("start_sec", row.get("windowStartSec", 0)))
+                        end = float(row.get("end_sec", row.get("windowEndSec", 0)))
+                        period = int(row.get("period", 0))
+                        mask = (control_df["period"] == period) & \
+                               (control_df["elapsed"] >= start) & \
+                               (control_df["elapsed"] < end)
+                        sub = control_df[mask]
+                        home_vals.append(float(sub["home_control"].mean()) if not sub.empty else np.nan)
+                        away_vals.append(float(sub["away_control"].mean()) if not sub.empty else np.nan)
+                    if "mean_home_control" not in df.columns:
+                        df["mean_home_control"] = home_vals
+                    if "mean_away_control" not in df.columns:
+                        df["mean_away_control"] = away_vals
+            except Exception:
+                pass
+        
+        # Apply Filters
+        team_filter = _normalize_team_filter(filters.get("team", "All"))
+        if team_filter != "all":
+            team_values = df["team"].astype(str).str.strip().str.lower()
+            df = df[team_values == team_filter].copy()
+        if filters.get("period") != "All":
+            df = df[df["period"] == int(filters["period"])]
+        if filters.get("formation") != "All":
+            col = 'variant' if 'variant' in df.columns else 'formation'
+            df = df[df[col] == filters["formation"]]
+        if filters.get("min_duration", 0) > 0:
+            df = df[df["duration"] >= filters["min_duration"]]
+            
+        if df.empty:
+            fig, ax = plt.subplots(figsize=(8, 6))
+            ax.text(0.5, 0.5, "No segments match the selected filters.", 
+                    ha="center", va="center", fontsize=12, color=TEXT_PRIMARY)
+            ax.set_facecolor(FIG_FACE); fig.patch.set_facecolor(FIG_FACE)
+            return fig
+            
+        # Resolve Columns
+        x_axis_label = encodings.get("x_axis", "Width")
+        y_axis_label = encodings.get("y_axis", "Depth")
+        x_col = _resolve_metric_column(x_axis_label, team_filter)
+        y_col = _resolve_metric_column(y_axis_label, team_filter)
+        
+        plot_df = df.dropna(subset=[x_col, y_col]).copy().reset_index(drop=True)
+        
+        # Apply team orientation mirroring for single-team views
+        if team_filter != "all":
+            plot_df = _apply_team_orientation_to_position_columns(
+                plot_df, team_filter, folder / "metadata.json"
+            )
+            
+        plot_df['plot_id'] = range(len(plot_df))
+
+    # --- Handle Graph Mode & Team Names ---
     graph_mode = encodings.get("graph_mode", "Combined")
     valid_modes = {"Combined", "Split by Team"}
     if graph_mode not in valid_modes:
         graph_mode = "Combined"
     
-    # Get real team names for titles
+    # FIX: Always resolve team names, even when using pre_filtered_df
     home_name, away_name = _get_team_names(match_id, processed_dir)
-    
-    # --- Apply Filters (Global) ---
-    team_filter = _normalize_team_filter(filters.get("team", "All"))
-    if team_filter != "all":
-        team_values = df["team"].astype(str).str.strip().str.lower()
-        df = df[team_values == team_filter].copy()
-        
-    if filters.get("period") != "All":
-        df = df[df["period"] == int(filters["period"])]
-    if filters.get("formation") != "All":
-        col = 'variant' if 'variant' in df.columns else 'formation'
-        df = df[df[col] == filters["formation"]]
-    if filters.get("min_duration", 0) > 0:
-        df = df[df["duration"] >= filters["min_duration"]]
-        
-    if df.empty:
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.text(0.5, 0.5, "No segments match the selected filters.", 
-                ha="center", va="center", fontsize=12, color=TEXT_PRIMARY)
-        ax.set_facecolor(FIG_FACE); fig.patch.set_facecolor(FIG_FACE)
-        return fig
-        
-    # --- Resolve Columns ---
-    x_axis_label = encodings.get("x_axis", "Width")
-    y_axis_label = encodings.get("y_axis", "Depth")
-    x_col = _resolve_metric_column(x_axis_label, team_filter)
-    y_col = _resolve_metric_column(y_axis_label, team_filter)
-    
-    plot_df = df.dropna(subset=[x_col, y_col]).copy().reset_index(drop=True)
-    
-    # RESTORED: Apply team orientation mirroring for single-team views
-    if team_filter != "all":
-        plot_df = _apply_team_orientation_to_position_columns(
-            plot_df, team_filter, folder / "metadata.json"
-        )
-        
-    plot_df['plot_id'] = range(len(plot_df))
     
     # --- Prepare Color Data ---
     color_col_label = encodings.get("color", "None")
@@ -363,21 +384,27 @@ def plot_2d_analysis(match_id, processed_dir, filters, encodings):
         
         plt.tight_layout(); fig.subplots_adjust(right=0.85)
         
-        # --- STAGE 6: Apply Axis Ranges ---
-        x_range_mode = encodings.get("x_range_mode", "Auto (Current Data)")
-        y_range_mode = encodings.get("y_range_mode", "Auto (Current Data)")
+        # --- STAGE 6+7: Apply Axis Ranges (Pre-computed > Internal) ---
+        x_range = encodings.get("_precomputed_x_range")
+        y_range = encodings.get("_precomputed_y_range")
         
-        mode_map = {
-            "Auto (Current Data)": "auto",
-            "Fixed Metric Range": "fixed",
-            "Shared Range": "shared"
-        }
-        x_mode = mode_map.get(x_range_mode, "auto")
-        y_mode = mode_map.get(y_range_mode, "auto")
-        
-        x_range = get_axis_range(x_axis_label, x_mode, data)
-        y_range = get_axis_range(y_axis_label, y_mode, data)
-        
+        if x_range is None or y_range is None:
+            mode_map = {
+                "Auto (Current Data)": "auto",
+                "Fixed Metric Range": "fixed",
+                "Shared Range": "shared"
+            }
+            
+            if x_range is None:
+                x_mode = mode_map.get(encodings.get("x_range_mode", "Auto (Current Data)"), "auto")
+                x_range = get_axis_range(x_axis_label, x_mode, [data], 
+                                         lambda m, t: _resolve_metric_column(m, t))
+                                     
+            if y_range is None:
+                y_mode = mode_map.get(encodings.get("y_range_mode", "Auto (Current Data)"), "auto")
+                y_range = get_axis_range(y_axis_label, y_mode, [data],
+                                         lambda m, t: _resolve_metric_column(m, t))
+
         if x_range is not None:
             ax.set_xlim(x_range)
         if y_range is not None:
