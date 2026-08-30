@@ -3,8 +3,9 @@
 Loads formation_segments.csv and plots one point per segment.
 Stage 3: Enhanced interactions, legends, and metadata attachment.
 Stage 4: Integrated EPV/DAS metrics.
-Stage 5: Graph Control UI integration + Split by Team Visualization.
-FIXED: Added on-the-fly loading for Pitch Control/OBSO to prevent KeyError.
+Stage 5: Graph Control UI + Split by Team Visualization.
+Stage 6: Axis Range Configuration Integration.
+FIXED: Safe metric loading + preserved Graph/Range controls.
 """
 import pandas as pd
 import numpy as np
@@ -15,6 +16,7 @@ from ..io.paths import match_dir
 from ..analytics.formations.segments import _aggregate_obso_for_segment
 from ..analytics.formations.taxonomy import derive_hierarchy
 from .theme import FIG_FACE, TEXT_PRIMARY, LABEL_COLOR, TICK_COLOR, GRID
+from .metric_ranges import get_axis_range
 
 # Map UI labels to CSV columns
 METRIC_COLS = {
@@ -35,7 +37,6 @@ METRIC_COLS = {
     "OBSO": "mean_obso",
     "N Windows": "n_windows",
     "N Frames": "n_frames",
-    # Stage 4 Metrics
     "Cumulative EPV": "cumulative_epv",
     "Mean EPV": "mean_epv",
     "EPV / min": "epv_per_min",
@@ -361,6 +362,27 @@ def plot_2d_analysis(match_id, processed_dir, filters, encodings):
         ax.grid(True, alpha=0.2, color=GRID)
         
         plt.tight_layout(); fig.subplots_adjust(right=0.85)
+        
+        # --- STAGE 6: Apply Axis Ranges ---
+        x_range_mode = encodings.get("x_range_mode", "Auto (Current Data)")
+        y_range_mode = encodings.get("y_range_mode", "Auto (Current Data)")
+        
+        mode_map = {
+            "Auto (Current Data)": "auto",
+            "Fixed Metric Range": "fixed",
+            "Shared Range": "shared"
+        }
+        x_mode = mode_map.get(x_range_mode, "auto")
+        y_mode = mode_map.get(y_range_mode, "auto")
+        
+        x_range = get_axis_range(x_axis_label, x_mode, data)
+        y_range = get_axis_range(y_axis_label, y_mode, data)
+        
+        if x_range is not None:
+            ax.set_xlim(x_range)
+        if y_range is not None:
+            ax.set_ylim(y_range)
+        # --------------------------------
         
         # Attach Interaction Data
         fig._segment_records = data.to_dict('records')

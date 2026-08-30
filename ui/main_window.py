@@ -287,7 +287,7 @@ class AccordionSidebar(QWidget):
         ("Formations",        "Detect team formations from player positions using template matching.", "▸ Detect Formations"),
         ("EPV + DAS",         "Compute Expected Possession Value and Dangerous Action Sequences.", "▸ Run EPV + DAS"),
         ("Pitch Control",     "Compute pitch control per formation window.", "▸ Compute Pitch Control"),
-        ("OBSO",              "Compute Off-Ball Scoring Opportunity per formation window.", "▸ Compute OBSO"),
+        ("OBSO",              "Compute Off-Ball Scoring Opportunity per formation window.", " Compute OBSO"),
         ("Timeline",          "Plot formation changes over the match.", " Show Timeline"),
         ("2D Analysis",       "Tactical analysis of formation segments in 2D space.", "▸ Run 2D Analysis"),
         ("Viewer",            "Interactive match viewer with scrubbable slider and playback controls.", "▸ Open Match Viewer"),
@@ -767,7 +767,7 @@ class MainWindow(QMainWindow):
         self._2d_formation = make_combo("FORMATION", ["All"])
         self._2d_min_duration = make_spin("MIN DURATION (s)", 0, 3600, 0)
 
-        # NEW: Graph Mode Control
+        # Graph Mode Control
         self._2d_graph_mode = make_combo("GRAPH MODE", ["Combined", "Split by Team"])
         self._2d_graph_mode.setCurrentText("Combined")
 
@@ -781,7 +781,9 @@ class MainWindow(QMainWindow):
             "Center X", "Center Y", "Elongation", 
             "Centroid Displacement", "Centroid Velocity", "Confidence",
             "Pitch Control", "Home Control", "Away Control",
-            "OBSO"
+            "OBSO",
+            "Cumulative EPV", "Mean EPV", "EPV / min",
+            "DAS Count", "DAS / min"
         ]
         
         self._2d_x_axis = make_combo("X-AXIS", metrics_list)
@@ -794,6 +796,14 @@ class MainWindow(QMainWindow):
         self._2d_color.setCurrentText("Compactness")
         
         self._2d_shape = make_combo("SHAPE", ["Formation Family", "Formation"])
+        
+        # Axis Range Controls
+        range_modes = ["Auto (Current Data)", "Fixed Metric Range", "Shared Range"]
+        self._2d_x_range = make_combo("X-AXIS RANGE", range_modes)
+        self._2d_x_range.setCurrentText("Auto (Current Data)")
+        
+        self._2d_y_range = make_combo("Y-AXIS RANGE", range_modes)
+        self._2d_y_range.setCurrentText("Auto (Current Data)")
         
         layout.addStretch()
         return container
@@ -942,8 +952,10 @@ class MainWindow(QMainWindow):
             "y_axis": self._2d_y_axis.currentText(),
             "color": self._2d_color.currentText(),
             "shape": self._2d_shape.currentText(),
-            # Pass graph mode into configuration
+            # Pass graph mode and range modes to plotting function
             "graph_mode": self._2d_graph_mode.currentText(),
+            "x_range_mode": self._2d_x_range.currentText(),
+            "y_range_mode": self._2d_y_range.currentText(),
         }
         
         try:
