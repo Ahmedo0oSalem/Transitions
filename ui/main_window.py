@@ -11,7 +11,8 @@ from PyQt6.QtCore import Qt, QObject, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QDoubleSpinBox, QDialog, QFileDialog, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
-    QSizePolicy, QSpinBox, QTabWidget, QTextEdit, QToolButton, QVBoxLayout, QWidget,
+    QSizePolicy, QScrollArea, QSpinBox, QTabWidget, QTextEdit, QToolButton, QVBoxLayout, QWidget,
+    QSplitter,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from ..io.paths import EPV_GRID_PATH, PROCESSED_DIR, RAW_TRACKING_DIR
@@ -93,53 +94,61 @@ class LegendPopup(QDialog):
         close_btn.clicked.connect(self.close)
         layout.addWidget(close_btn)
 
-class FigureTab(QWidget):
-    """Widget hosting a matplotlib figure + navigation toolbar + details panel."""
-    def __init__(self, title: str, figure) -> None:
-        super().__init__()
+class ComparisonView(QWidget):
+    """Custom widget for side-by-side graph comparison."""
+    def __init__(self, figures_with_labels: list[tuple[str, any]], parent=None):
+        super().__init__(parent)
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(8)
         
-        # Left side: Plot container
-        plot_container = QWidget()
-        plot_layout = QVBoxLayout(plot_container)
-        plot_layout.setContentsMargins(0, 0, 0, 0)
+        # Left side: Splitter for two graphs
+        splitter = QSplitter(Qt.Orientation.Horizontal)
         
-        canvas = figure.canvas
-        if not isinstance(canvas, FigureCanvasQTAgg):
-            canvas = FigureCanvasQTAgg(figure)
-        canvas.setParent(self)
-        canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        
-        # Toolbar row with Show Legend button
-        toolbar_row = QHBoxLayout()
-        toolbar = NavigationToolbar2QT(canvas, self)
-        toolbar_row.addWidget(toolbar, 1)
-        
-        # Add Show Legend button if data exists
-        if hasattr(figure, '_legend_data'):
-            legend_btn = QPushButton("📋 Show Legend")
-            legend_btn.setObjectName("runButton")
-            legend_btn.setMinimumHeight(28)
-            legend_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            legend_btn.clicked.connect(lambda: self._show_legend_popup(figure))
-            toolbar_row.addWidget(legend_btn)
+        for label, figure in figures_with_labels:
+            graph_container = QWidget()
+            graph_layout = QVBoxLayout(graph_container)
+            graph_layout.setContentsMargins(0, 0, 0, 0)
             
-        plot_layout.addLayout(toolbar_row)
-        plot_layout.addWidget(canvas, 1)
-        canvas.draw_idle()
-        self.canvas = canvas
-        self.title = title
+            canvas = figure.canvas if hasattr(figure, 'canvas') else FigureCanvasQTAgg(figure)
+            canvas.setParent(graph_container)
+            canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            
+            toolbar_row = QHBoxLayout()
+            toolbar = NavigationToolbar2QT(canvas, graph_container)
+            toolbar_row.addWidget(toolbar, 1)
+            
+            if hasattr(figure, '_legend_data'):
+                legend_btn = QPushButton("📋 Show Legend")
+                legend_btn.setObjectName("runButton")
+                legend_btn.setMinimumHeight(28)
+                legend_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                legend_btn.clicked.connect(lambda checked, f=figure: self._show_legend(f))
+                toolbar_row.addWidget(legend_btn)
+                
+            graph_layout.addLayout(toolbar_row)
+            graph_layout.addWidget(canvas, 1)
+            canvas.draw_idle()
+            
+            # Add label above graph
+            lbl = QLabel(f"<b>{label}</b>")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("font-size: 12px; color: #e0e0e0; padding: 4px;")
+            graph_layout.insertWidget(0, lbl)
+            
+            splitter.addWidget(graph_container)
         
-        main_layout.addWidget(plot_container, 3)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        main_layout.addWidget(splitter, 3)
         
-        # Right side: Details Panel
+        # Right side: Shared Details Panel
         self.details_panel = QTextEdit()
         self.details_panel.setReadOnly(True)
         self.details_panel.setMinimumWidth(250)
         self.details_panel.setMaximumWidth(350)
-        self.details_panel.setStyleSheet(f"""
-            QTextEdit {{
+        self.details_panel.setStyleSheet("""
+            QTextEdit {
                 background: rgba(0, 0, 0, 0.22);
                 border: 1px solid #2a3a4a;
                 border-radius: 9px;
@@ -147,16 +156,16 @@ class FigureTab(QWidget):
                 color: #e0e0e0;
                 font-family: "Segoe UI", sans-serif;
                 font-size: 12px;
-            }}
+            }
         """)
         self.details_panel.setHtml("<b>Segment Details</b><br><br>Hover or click a point to see details.")
         main_layout.addWidget(self.details_panel, 1)
         
-        # --- Interaction Handlers ---
-        self._setup_interactions(figure)
+        # Store references for interaction setup
+        self._figures = [f for _, f in figures_with_labels]
+        self._setup_interactions()
 
-    def _show_legend_popup(self, figure):
-        """Open a modal popup with legend information."""
+    def _show_legend(self, figure):
         data = figure._legend_data
         popup = LegendPopup(
             self,
@@ -166,79 +175,79 @@ class FigureTab(QWidget):
         )
         popup.exec()
 
-    def _setup_interactions(self, figure):
-        if not hasattr(figure, '_segment_records'):
-            return
+    def _setup_interactions(self):
+        for figure in self._figures:
+            if not hasattr(figure, '_segment_records'):
+                continue
+                
+            canvas = figure.canvas
             
-        canvas = self.canvas
-        
-        def on_hover(event):
-            if event.inaxes != figure.axes[0]:
-                figure._hover_annot.set_visible(False)
-                canvas.draw_idle()
-                return
-                
-            for sc, ids in figure._scatter_map.items():
-                cont, ind = sc.contains(event)
-                if cont:
-                    idx = ind['ind'][0]
-                    plot_id = ids[idx]
-                    record = figure._segment_records[plot_id]
-                    
-                    # Update annotation text - safely handle numeric formatting
-                    enc = figure._encodings
-                    x_val = record.get(METRIC_COLS.get(enc['x_axis'], ''), 'N/A')
-                    y_val = record.get(METRIC_COLS.get(enc['y_axis'], ''), 'N/A')
-                    
-                    try:
-                        x_formatted = f"{float(x_val):.2f}" if x_val != 'N/A' else 'N/A'
-                    except (ValueError, TypeError):
-                        x_formatted = str(x_val)
+            def make_hover(fig):
+                def on_hover(event):
+                    if event.inaxes != fig.axes[0]:
+                        fig._hover_annot.set_visible(False)
+                        fig.canvas.draw_idle()
+                        return
                         
-                    try:
-                        y_formatted = f"{float(y_val):.2f}" if y_val != 'N/A' else 'N/A'
-                    except (ValueError, TypeError):
-                        y_formatted = str(y_val)
-                    
-                    text = (f"<b>{record.get('variant', 'N/A')}</b> ({record.get('family', 'N/A')})\n"
-                            f"Time: {format_time(record.get('start_sec', 0))} – {format_time(record.get('end_sec', 0))}\n"
-                            f"Dur: {format_time(record.get('duration', 0))}\n"
-                            f"{enc['x_axis']}: {x_formatted}\n"
-                            f"{enc['y_axis']}: {y_formatted}")
-                    
-                    figure._hover_annot.set_text(text)
-                    figure._hover_annot.set_position((event.xdata, event.ydata))
-                    figure._hover_annot.set_visible(True)
-                    canvas.draw_idle()
-                    return
-                    
-            figure._hover_annot.set_visible(False)
-            canvas.draw_idle()
+                    for sc, ids in fig._scatter_map.items():
+                        cont, ind = sc.contains(event)
+                        if cont:
+                            idx = ind['ind'][0]
+                            plot_id = ids[idx]
+                            record = fig._segment_records[plot_id]
+                            
+                            enc = fig._encodings
+                            x_val = record.get(METRIC_COLS.get(enc['x_axis'], ''), 'N/A')
+                            y_val = record.get(METRIC_COLS.get(enc['y_axis'], ''), 'N/A')
+                            
+                            try: x_formatted = f"{float(x_val):.2f}" if x_val != 'N/A' else 'N/A'
+                            except: x_formatted = str(x_val)
+                            try: y_formatted = f"{float(y_val):.2f}" if y_val != 'N/A' else 'N/A'
+                            except: y_formatted = str(y_val)
+                            
+                            text = (f"<b>{record.get('variant', 'N/A')}</b> ({record.get('family', 'N/A')})\n"
+                                    f"Time: {format_time(record.get('start_sec', 0))} – {format_time(record.get('end_sec', 0))}\n"
+                                    f"Dur: {format_time(record.get('duration', 0))}\n"
+                                    f"{enc['x_axis']}: {x_formatted}\n"
+                                    f"{enc['y_axis']}: {y_formatted}")
+                            
+                            fig._hover_annot.set_text(text)
+                            fig._hover_annot.set_position((event.xdata, event.ydata))
+                            fig._hover_annot.set_visible(True)
+                            fig.canvas.draw_idle()
+                            return
+                            
+                    fig._hover_annot.set_visible(False)
+                    fig.canvas.draw_idle()
+                return on_hover
 
-        def on_click(event):
-            if event.inaxes != figure.axes[0] or event.button != 1:
-                return
-                
-            for sc, ids in figure._scatter_map.items():
-                cont, ind = sc.contains(event)
-                if cont:
-                    idx = ind['ind'][0]
-                    plot_id = ids[idx]
-                    record = figure._segment_records[plot_id]
-                    
-                    # Highlight point
-                    figure._selection_ring.set_offsets([[record[METRIC_COLS.get(figure._encodings['x_axis'], 'mean_width')], 
-                                                         record[METRIC_COLS.get(figure._encodings['y_axis'], 'mean_depth')]]])
-                    canvas.draw_idle()
-                    
-                    # Update details panel
-                    self._update_details_panel(record)
-                    return
+            def make_click(fig):
+                def on_click(event):
+                    if event.inaxes != fig.axes[0] or event.button != 1:
+                        return
+                        
+                    for sc, ids in fig._scatter_map.items():
+                        cont, ind = sc.contains(event)
+                        if cont:
+                            idx = ind['ind'][0]
+                            plot_id = ids[idx]
+                            record = fig._segment_records[plot_id]
+                            
+                            fig._selection_ring.set_offsets([[
+                                record[METRIC_COLS.get(fig._encodings['x_axis'], 'mean_width')], 
+                                record[METRIC_COLS.get(fig._encodings['y_axis'], 'mean_depth')]
+                            ]])
+                            fig.canvas.draw_idle()
+                            
+                            # Update shared details panel
+                            self._update_details(record)
+                            return
+                return on_click
 
-        canvas.mpl_connect('motion_notify_event', on_hover)
-        canvas.mpl_connect('button_press_event', on_click)
+            canvas.mpl_connect('motion_notify_event', make_hover(figure))
+            canvas.mpl_connect('button_press_event', make_click(figure))
 
-    def _update_details_panel(self, record):
+    def _update_details(self, record):
         def fmt(val, decimals=2):
             if val is None or (isinstance(val, float) and pd.isna(val)): return "N/A"
             return f"{val:.{decimals}f}"
@@ -255,23 +264,137 @@ class FigureTab(QWidget):
             <tr><td style="color: #8a9aaa; padding: 4px;">End:</td><td style="padding: 4px;">{format_time(record.get('end_sec', 0))}</td></tr>
             <tr><td style="color: #8a9aaa; padding: 4px;">Duration:</td><td style="padding: 4px;">{format_time(record.get('duration', 0))}</td></tr>
             <tr><td colspan="2" style="border-top: 1px solid #2a3a4a; margin: 5px 0;"></td></tr>
-            <tr><td style="color: #8a9aaa; padding: 4px;">In Possession:</td><td style="padding: 4px;">{fmt(record.get('in_possession_sec', 0), 1)}s</td></tr>
-            <tr><td style="color: #8a9aaa; padding: 4px;">Out of Possession:</td><td style="padding: 4px;">{fmt(record.get('out_of_possession_sec', 0), 1)}s</td></tr>
-            <tr><td style="color: #8a9aaa; padding: 4px;">Loose Ball:</td><td style="padding: 4px;">{fmt(record.get('loose_ball_sec', 0), 1)}s</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Mean Width:</td><td style="padding: 4px;">{fmt(record.get('mean_width'))} m</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Mean Depth:</td><td style="padding: 4px;">{fmt(record.get('mean_depth'))} m</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Mean Compactness:</td><td style="padding: 4px;">{fmt(record.get('mean_compactness'))} m</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Cumulative EPV:</td><td style="padding: 4px;">{fmt(record.get('cumulative_epv'), 4)}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Mean EPV:</td><td style="padding: 4px;">{fmt(record.get('mean_epv'), 4)}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">DAS Count:</td><td style="padding: 4px;">{record.get('das_count', 'N/A')}</td></tr>
+        </table>
+        """
+        self.details_panel.setHtml(html)
+
+class FigureTab(QWidget):
+    """Widget hosting a single matplotlib figure + navigation toolbar + details panel."""
+    def __init__(self, title: str, figure) -> None:
+        super().__init__()
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        
+        plot_container = QWidget()
+        plot_layout = QVBoxLayout(plot_container)
+        plot_layout.setContentsMargins(0, 0, 0, 0)
+        
+        canvas = figure.canvas if hasattr(figure, 'canvas') else FigureCanvasQTAgg(figure)
+        canvas.setParent(plot_container)
+        canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        
+        toolbar_row = QHBoxLayout()
+        toolbar = NavigationToolbar2QT(canvas, self)
+        toolbar_row.addWidget(toolbar, 1)
+        
+        if hasattr(figure, '_legend_data'):
+            legend_btn = QPushButton(" Show Legend")
+            legend_btn.setObjectName("runButton")
+            legend_btn.setMinimumHeight(28)
+            legend_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            legend_btn.clicked.connect(lambda: self._show_legend_popup(figure))
+            toolbar_row.addWidget(legend_btn)
+            
+        plot_layout.addLayout(toolbar_row)
+        plot_layout.addWidget(canvas, 1)
+        canvas.draw_idle()
+        self.canvas = canvas
+        self.title = title
+        
+        main_layout.addWidget(plot_container, 3)
+        
+        self.details_panel = QTextEdit()
+        self.details_panel.setReadOnly(True)
+        self.details_panel.setMinimumWidth(250)
+        self.details_panel.setMaximumWidth(350)
+        self.details_panel.setStyleSheet("""
+            QTextEdit {
+                background: rgba(0, 0, 0, 0.22);
+                border: 1px solid #2a3a4a;
+                border-radius: 9px;
+                padding: 10px;
+                color: #e0e0e0;
+                font-family: "Segoe UI", sans-serif;
+                font-size: 12px;
+            }
+        """)
+        self.details_panel.setHtml("<b>Segment Details</b><br><br>Hover or click a point to see details.")
+        main_layout.addWidget(self.details_panel, 1)
+        
+        self._setup_interactions(figure)
+
+    def _show_legend_popup(self, figure):
+        data = figure._legend_data
+        popup = LegendPopup(self, title=data['title'], shape_categories=data['shape_categories'], color_metric=data['color_metric'])
+        popup.exec()
+
+    def _setup_interactions(self, figure):
+        if not hasattr(figure, '_segment_records'): return
+        canvas = self.canvas
+        
+        def on_hover(event):
+            if event.inaxes != figure.axes[0]:
+                figure._hover_annot.set_visible(False); canvas.draw_idle(); return
+            for sc, ids in figure._scatter_map.items():
+                cont, ind = sc.contains(event)
+                if cont:
+                    idx = ind['ind'][0]; plot_id = ids[idx]; record = figure._segment_records[plot_id]
+                    enc = figure._encodings
+                    x_val = record.get(METRIC_COLS.get(enc['x_axis'], ''), 'N/A')
+                    y_val = record.get(METRIC_COLS.get(enc['y_axis'], ''), 'N/A')
+                    try: x_formatted = f"{float(x_val):.2f}" if x_val != 'N/A' else 'N/A'
+                    except: x_formatted = str(x_val)
+                    try: y_formatted = f"{float(y_val):.2f}" if y_val != 'N/A' else 'N/A'
+                    except: y_formatted = str(y_val)
+                    text = (f"<b>{record.get('variant', 'N/A')}</b> ({record.get('family', 'N/A')})\n"
+                            f"Time: {format_time(record.get('start_sec', 0))} – {format_time(record.get('end_sec', 0))}\n"
+                            f"Dur: {format_time(record.get('duration', 0))}\n"
+                            f"{enc['x_axis']}: {x_formatted}\n{enc['y_axis']}: {y_formatted}")
+                    figure._hover_annot.set_text(text); figure._hover_annot.set_position((event.xdata, event.ydata))
+                    figure._hover_annot.set_visible(True); canvas.draw_idle(); return
+            figure._hover_annot.set_visible(False); canvas.draw_idle()
+
+        def on_click(event):
+            if event.inaxes != figure.axes[0] or event.button != 1: return
+            for sc, ids in figure._scatter_map.items():
+                cont, ind = sc.contains(event)
+                if cont:
+                    idx = ind['ind'][0]; plot_id = ids[idx]; record = figure._segment_records[plot_id]
+                    figure._selection_ring.set_offsets([[record[METRIC_COLS.get(figure._encodings['x_axis'], 'mean_width')], 
+                                                         record[METRIC_COLS.get(figure._encodings['y_axis'], 'mean_depth')]]])
+                    canvas.draw_idle(); self._update_details_panel(record); return
+
+        canvas.mpl_connect('motion_notify_event', on_hover)
+        canvas.mpl_connect('button_press_event', on_click)
+
+    def _update_details_panel(self, record):
+        def fmt(val, decimals=2):
+            if val is None or (isinstance(val, float) and pd.isna(val)): return "N/A"
+            return f"{val:.{decimals}f}"
+        html = f"""
+        <h3 style="color: #2b8a3e; margin-bottom: 10px;">Segment Details</h3>
+        <table style="width: 100%; border-collapse: collapse;">
+            <tr><td style="color: #8a9aaa; padding: 4px;">Formation:</td><td style="font-weight: bold; padding: 4px;">{record.get('variant', 'N/A')}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Family:</td><td style="padding: 4px;">{record.get('family', 'N/A')}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Team:</td><td style="padding: 4px;">{record.get('team', 'N/A').capitalize()}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Period:</td><td style="padding: 4px;">{record.get('period', 'N/A')}</td></tr>
+            <tr><td colspan="2" style="border-top: 1px solid #2a3a4a; margin: 5px 0;"></td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Start:</td><td style="padding: 4px;">{format_time(record.get('start_sec', 0))}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">End:</td><td style="padding: 4px;">{format_time(record.get('end_sec', 0))}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Duration:</td><td style="padding: 4px;">{format_time(record.get('duration', 0))}</td></tr>
             <tr><td colspan="2" style="border-top: 1px solid #2a3a4a; margin: 5px 0;"></td></tr>
             <tr><td style="color: #8a9aaa; padding: 4px;">Mean Width:</td><td style="padding: 4px;">{fmt(record.get('mean_width'))} m</td></tr>
             <tr><td style="color: #8a9aaa; padding: 4px;">Mean Depth:</td><td style="padding: 4px;">{fmt(record.get('mean_depth'))} m</td></tr>
             <tr><td style="color: #8a9aaa; padding: 4px;">Mean Compactness:</td><td style="padding: 4px;">{fmt(record.get('mean_compactness'))} m</td></tr>
-            <tr><td style="color: #8a9aaa; padding: 4px;">Mean Center X:</td><td style="padding: 4px;">{fmt(record.get('mean_center_x'))}</td></tr>
-            <tr><td style="color: #8a9aaa; padding: 4px;">Mean Center Y:</td><td style="padding: 4px;">{fmt(record.get('mean_center_y'))}</td></tr>
-            <tr><td colspan="2" style="border-top: 1px solid #2a3a4a; margin: 5px 0;"></td></tr>
-            <tr><td style="color: #8a9aaa; padding: 4px;">Centroid Velocity:</td><td style="padding: 4px;">{fmt(record.get('mean_centroid_velocity'))} m/s</td></tr>
-            <tr><td style="color: #8a9aaa; padding: 4px;">Template Displacement:</td><td style="padding: 4px;">{fmt(record.get('mean_template_displacement'))} m</td></tr>
-            <tr><td style="color: #8a9aaa; padding: 4px;">Mean Confidence:</td><td style="padding: 4px;">{fmt(record.get('mean_confidence'), 4)}</td></tr>
-            <tr><td style="color: #8a9aaa; padding: 4px;">Min Confidence:</td><td style="padding: 4px;">{fmt(record.get('min_confidence'), 4)}</td></tr>
-            <tr><td colspan="2" style="border-top: 1px solid #2a3a4a; margin: 5px 0;"></td></tr>
-            <tr><td style="color: #8a9aaa; padding: 4px;">N Windows:</td><td style="padding: 4px;">{record.get('n_windows', 'N/A')}</td></tr>
-            <tr><td style="color: #8a9aaa; padding: 4px;">N Frames:</td><td style="padding: 4px;">{record.get('n_frames', 'N/A')}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Cumulative EPV:</td><td style="padding: 4px;">{fmt(record.get('cumulative_epv'), 4)}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">Mean EPV:</td><td style="padding: 4px;">{fmt(record.get('mean_epv'), 4)}</td></tr>
+            <tr><td style="color: #8a9aaa; padding: 4px;">DAS Count:</td><td style="padding: 4px;">{record.get('das_count', 'N/A')}</td></tr>
         </table>
         """
         self.details_panel.setHtml(html)
@@ -686,7 +809,6 @@ class MainWindow(QMainWindow):
         self._match_label.setObjectName("statusMatch")
         self.statusBar().addPermanentWidget(self._match_label)
         self.top.match_combo.currentTextChanged.connect(self._update_match_status)
-        # Connect match change to update formation dropdown
         self.top.match_combo.currentTextChanged.connect(self._update_formation_dropdown)
         self._update_match_status(self.top.match_id)
 
@@ -700,42 +822,56 @@ class MainWindow(QMainWindow):
         return tab
 
     def _update_formation_dropdown(self, match_id: str) -> None:
-        """Populate the Formation dropdown based on the selected match's segments."""
         if not match_id:
-            self._2d_formation.clear()
-            self._2d_formation.addItem("All")
+            for prefix in ["A", "B"]:
+                combo = getattr(self, f"_{prefix}_formation", None)
+                if combo: combo.clear(); combo.addItem("All")
             return
             
         try:
             folder = Path(self.top.processed_dir) / str(match_id)
             segments_path = folder / "formation_segments.csv"
-            
+            variants = ["All"]
             if segments_path.is_file():
                 df = pd.read_csv(segments_path)
-                # Clean variant names just like in two_d_analysis
                 if 'variant' in df.columns:
-                    variants = df['variant'].astype(str).apply(lambda x: x.split('\n')[0].strip()).unique()
-                    variants = sorted([v for v in variants if v])
-                else:
-                    variants = []
-                    
-                self._2d_formation.blockSignals(True)
-                self._2d_formation.clear()
-                self._2d_formation.addItem("All")
-                self._2d_formation.addItems(variants)
-                self._2d_formation.blockSignals(False)
-            else:
-                self._2d_formation.clear()
-                self._2d_formation.addItem("All")
+                    variants += sorted(df['variant'].astype(str).apply(lambda x: x.split('\n')[0].strip()).unique())
+            
+            for prefix in ["A", "B"]:
+                combo = getattr(self, f"_{prefix}_formation", None)
+                if combo:
+                    combo.blockSignals(True)
+                    combo.clear()
+                    combo.addItems(variants)
+                    combo.blockSignals(False)
         except Exception:
-            # Fallback if reading fails
-            self._2d_formation.clear()
-            self._2d_formation.addItem("All")
+            for prefix in ["A", "B"]:
+                combo = getattr(self, f"_{prefix}_formation", None)
+                if combo: combo.clear(); combo.addItem("All")
 
     def _build_2d_controls(self) -> QWidget:
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setMaximumHeight(500)
+        
+        scroll_area.setStyleSheet("""
+            QScrollArea { background: transparent; border: none; }
+            QScrollBar:vertical {
+                border: none; background: rgba(0, 0, 0, 0.2); width: 6px; margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(255, 255, 255, 0.2); min-height: 30px; border-radius: 3px;
+            }
+            QScrollBar::handle:vertical:hover { background: rgba(255, 255, 255, 0.3); }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+        """)
+        
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 0, 8, 0)
         layout.setSpacing(6)
 
         def make_combo(label_text: str, items: list[str]) -> QComboBox:
@@ -762,15 +898,9 @@ class MainWindow(QMainWindow):
             layout.addWidget(spin)
             return spin
 
-        self._2d_team = make_combo("TEAM", ["All", "Home", "Away"])
-        self._2d_period = make_combo("PERIOD", ["All", "1", "2"])
-        self._2d_formation = make_combo("FORMATION", ["All"])
-        self._2d_min_duration = make_spin("MIN DURATION (s)", 0, 3600, 0)
-
-        # Graph Mode Control
-        self._2d_graph_mode = make_combo("GRAPH MODE", ["Combined", "Split by Team"])
-        self._2d_graph_mode.setCurrentText("Combined")
-
+        self._2d_display_mode = make_combo("DISPLAY MODE", ["Single Graph", "Compare Two Graphs"])
+        self._2d_display_mode.setCurrentText("Single Graph")
+        
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color: rgba(255,255,255,0.08); margin: 4px 0;")
@@ -785,28 +915,56 @@ class MainWindow(QMainWindow):
             "Cumulative EPV", "Mean EPV", "EPV / min",
             "DAS Count", "DAS / min"
         ]
-        
-        self._2d_x_axis = make_combo("X-AXIS", metrics_list)
-        self._2d_x_axis.setCurrentText("Width")
-        
-        self._2d_y_axis = make_combo("Y-AXIS", metrics_list)
-        self._2d_y_axis.setCurrentText("Depth")
-        
-        self._2d_color = make_combo("COLOR", metrics_list)
-        self._2d_color.setCurrentText("Compactness")
-        
-        self._2d_shape = make_combo("SHAPE", ["Formation Family", "Formation"])
-        
-        # Axis Range Controls
         range_modes = ["Auto (Current Data)", "Fixed Metric Range", "Shared Range"]
-        self._2d_x_range = make_combo("X-AXIS RANGE", range_modes)
-        self._2d_x_range.setCurrentText("Auto (Current Data)")
+
+        def build_graph_block(prefix: str):
+            block = QWidget()
+            bl = QVBoxLayout(block)
+            bl.setContentsMargins(0,0,0,0)
+            bl.setSpacing(6)
+            
+            setattr(self, f"_{prefix}_team", make_combo(f"[{prefix}] TEAM", ["All", "Home", "Away"]))
+            getattr(self, f"_{prefix}_team").setCurrentText("All")
+            
+            setattr(self, f"_{prefix}_period", make_combo(f"[{prefix}] PERIOD", ["All", "1", "2"]))
+            setattr(self, f"_{prefix}_formation", make_combo(f"[{prefix}] FORMATION", ["All"]))
+            setattr(self, f"_{prefix}_min_duration", make_spin(f"[{prefix}] MIN DURATION (s)", 0, 3600, 0))
+            
+            setattr(self, f"_{prefix}_x_axis", make_combo(f"[{prefix}] X-AXIS", metrics_list))
+            getattr(self, f"_{prefix}_x_axis").setCurrentText("Width")
+            
+            setattr(self, f"_{prefix}_y_axis", make_combo(f"[{prefix}] Y-AXIS", metrics_list))
+            getattr(self, f"_{prefix}_y_axis").setCurrentText("Depth")
+            
+            setattr(self, f"_{prefix}_color", make_combo(f"[{prefix}] COLOR", metrics_list))
+            getattr(self, f"_{prefix}_color").setCurrentText("Compactness")
+            
+            setattr(self, f"_{prefix}_shape", make_combo(f"[{prefix}] SHAPE", ["Formation Family", "Formation"]))
+            
+            setattr(self, f"_{prefix}_x_range", make_combo(f"[{prefix}] X-RANGE", range_modes))
+            setattr(self, f"_{prefix}_y_range", make_combo(f"[{prefix}] Y-RANGE", range_modes))
+            
+            setattr(self, f"_{prefix}_graph_mode", make_combo(f"[{prefix}] GRAPH MODE", ["Combined", "Split by Team"]))
+            
+            return block
+
+        self._graph_a_block = build_graph_block("A")
+        self._graph_b_block = build_graph_block("B")
         
-        self._2d_y_range = make_combo("Y-AXIS RANGE", range_modes)
-        self._2d_y_range.setCurrentText("Auto (Current Data)")
+        self._graph_b_block.setVisible(False)
         
+        layout.addWidget(self._graph_a_block)
+        layout.addWidget(self._graph_b_block)
         layout.addStretch()
-        return container
+        
+        self._2d_display_mode.currentTextChanged.connect(self._toggle_2d_compare_mode)
+        
+        scroll_area.setWidget(container)
+        return scroll_area
+
+    def _toggle_2d_compare_mode(self, mode: str):
+        is_compare = mode == "Compare Two Graphs"
+        self._graph_b_block.setVisible(is_compare)
 
     def _match_id(self) -> str | None:
         match_id = self.top.match_id
@@ -873,20 +1031,29 @@ class MainWindow(QMainWindow):
 
     def _show_result(self, label: str, result: object) -> None:
         figures = []
-        if result is None:
-            return
+        if result is None: return
         if isinstance(result, tuple):
-            figures = list(result)
+            figures = [r for r in result if hasattr(r, "canvas")]
         elif hasattr(result, "canvas"):
             figures = [result]
-        else:
-            return
+        
+        if not figures: return
+            
         if self.tabs.count() == 1 and self.tabs.tabText(0) == "Results":
             self.tabs.removeTab(0)
         for index, figure in enumerate(figures, start=1):
             title = label if len(figures) == 1 else f"{label} {index}"
             self.tabs.addTab(FigureTab(title, figure), title)
             self.tabs.setCurrentIndex(self.tabs.count() - 1)
+
+    def _show_2d_comparison(self, figures_with_labels: list[tuple[str, any]]):
+        """Display 2D analysis results in side-by-side comparison view."""
+        if self.tabs.count() == 1 and self.tabs.tabText(0) == "Results":
+            self.tabs.removeTab(0)
+            
+        comparison_widget = ComparisonView(figures_with_labels, self)
+        self.tabs.addTab(comparison_widget, "2D Comparison")
+        self.tabs.setCurrentIndex(self.tabs.count() - 1)
 
     def run_pitch_control(self) -> None:
         match_id = self._match_id()
@@ -937,35 +1104,97 @@ class MainWindow(QMainWindow):
         
         import matplotlib.pyplot as plt
         plt.switch_backend("QtAgg")
-        
         from .two_d_analysis import plot_2d_analysis
         
-        filters = {
-            "team": self._2d_team.currentText(),
-            "period": self._2d_period.currentText(),
-            "formation": self._2d_formation.currentText(),
-            "min_duration": self._2d_min_duration.value(),
-        }
+        display_mode = self._2d_display_mode.currentText()
+        results = []  # Each item will be (label, figure_or_tuple_of_figures)
         
-        encodings = {
-            "x_axis": self._2d_x_axis.currentText(),
-            "y_axis": self._2d_y_axis.currentText(),
-            "color": self._2d_color.currentText(),
-            "shape": self._2d_shape.currentText(),
-            # Pass graph mode and range modes to plotting function
-            "graph_mode": self._2d_graph_mode.currentText(),
-            "x_range_mode": self._2d_x_range.currentText(),
-            "y_range_mode": self._2d_y_range.currentText(),
-        }
-        
+        configs = []
+        if display_mode == "Single Graph":
+            configs.append(("Graph A", {
+                "team": self._A_team.currentText(),
+                "period": self._A_period.currentText(),
+                "formation": self._A_formation.currentText(),
+                "min_duration": self._A_min_duration.value(),
+                "x_axis": self._A_x_axis.currentText(),
+                "y_axis": self._A_y_axis.currentText(),
+                "color": self._A_color.currentText(),
+                "shape": self._A_shape.currentText(),
+                "x_range_mode": self._A_x_range.currentText(),
+                "y_range_mode": self._A_y_range.currentText(),
+                "graph_mode": self._A_graph_mode.currentText(),
+            }))
+        else:
+            configs.append(("Graph A", {
+                "team": self._A_team.currentText(),
+                "period": self._A_period.currentText(),
+                "formation": self._A_formation.currentText(),
+                "min_duration": self._A_min_duration.value(),
+                "x_axis": self._A_x_axis.currentText(),
+                "y_axis": self._A_y_axis.currentText(),
+                "color": self._A_color.currentText(),
+                "shape": self._A_shape.currentText(),
+                "x_range_mode": self._A_x_range.currentText(),
+                "y_range_mode": self._A_y_range.currentText(),
+                "graph_mode": self._A_graph_mode.currentText(),
+            }))
+            configs.append(("Graph B", {
+                "team": self._B_team.currentText(),
+                "period": self._B_period.currentText(),
+                "formation": self._B_formation.currentText(),
+                "min_duration": self._B_min_duration.value(),
+                "x_axis": self._B_x_axis.currentText(),
+                "y_axis": self._B_y_axis.currentText(),
+                "color": self._B_color.currentText(),
+                "shape": self._B_shape.currentText(),
+                "x_range_mode": self._B_x_range.currentText(),
+                "y_range_mode": self._B_y_range.currentText(),
+                "graph_mode": self._B_graph_mode.currentText(),
+            }))
+
         try:
-            fig = plot_2d_analysis(match_id, self.top.processed_dir, filters, encodings)
-            self._show_result("2D Analysis", fig)
+            for label, encodings in configs:
+                filters = {k: v for k, v in encodings.items() if k in ("team","period","formation","min_duration")}
+                fig = plot_2d_analysis(match_id, self.top.processed_dir, filters, encodings)
+                
+                # FIX: Keep tuples intact so Split-by-Team renders together
+                results.append((label, fig))
+            
+            if display_mode == "Compare Two Graphs" and len(results) >= 2:
+                self._show_2d_comparison(results[:2])
+            else:
+                # For Single Graph mode, flatten tuples for tab display
+                flat_figs = []
+                for _, fig in results:
+                    if isinstance(fig, tuple):
+                        flat_figs.extend(fig)
+                    else:
+                        flat_figs.append(fig)
+                self._show_result("2D Analysis", tuple(flat_figs))
+                
         except Exception as e:
             import traceback
             self.log_panel.append(traceback.format_exc())
             QMessageBox.critical(self, "2D Analysis Failed", str(e))
 
+    def _show_2d_comparison(self, figures_with_labels: list[tuple[str, any]]):
+        """Display 2D analysis results in side-by-side comparison view."""
+        if self.tabs.count() == 1 and self.tabs.tabText(0) == "Results":
+            self.tabs.removeTab(0)
+        
+        # Flatten any tuples within each graph's output while preserving labels
+        expanded_results = []
+        for label, fig_or_tuple in figures_with_labels:
+            if isinstance(fig_or_tuple, tuple):
+                for i, f in enumerate(fig_or_tuple):
+                    expanded_results.append((f"{label} - {i+1}", f))
+            else:
+                expanded_results.append((label, fig_or_tuple))
+        
+        comparison_widget = ComparisonView(expanded_results, self)
+        self.tabs.addTab(comparison_widget, "2D Comparison")
+        self.tabs.setCurrentIndex(self.tabs.count() - 1)
+        
     def run_viewer(self) -> None:
         match_id = self._match_id()
         if match_id is None: return
