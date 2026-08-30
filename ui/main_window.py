@@ -169,6 +169,7 @@ class FigureTab(QWidget):
     def _setup_interactions(self, figure):
         if not hasattr(figure, '_segment_records'):
             return
+            
         canvas = self.canvas
         
         def on_hover(event):
@@ -189,7 +190,6 @@ class FigureTab(QWidget):
                     x_val = record.get(METRIC_COLS.get(enc['x_axis'], ''), 'N/A')
                     y_val = record.get(METRIC_COLS.get(enc['y_axis'], ''), 'N/A')
                     
-                    # Format values safely - only apply :.2f if value is numeric
                     try:
                         x_formatted = f"{float(x_val):.2f}" if x_val != 'N/A' else 'N/A'
                     except (ValueError, TypeError):
@@ -283,14 +283,14 @@ class FigureTab(QWidget):
 class AccordionSidebar(QWidget):
     SECTIONS: list[tuple[str, str, str]] = [
         ("Home",              "Run the full pipeline, or execute individual steps below.", "▸ Run Full Pipeline"),
-        ("Preprocess",        "Process raw tracking data into structured JSONL + metadata.", " Run Preprocess"),
+        ("Preprocess",        "Process raw tracking data into structured JSONL + metadata.", "▸ Run Preprocess"),
         ("Formations",        "Detect team formations from player positions using template matching.", "▸ Detect Formations"),
         ("EPV + DAS",         "Compute Expected Possession Value and Dangerous Action Sequences.", "▸ Run EPV + DAS"),
         ("Pitch Control",     "Compute pitch control per formation window.", "▸ Compute Pitch Control"),
         ("OBSO",              "Compute Off-Ball Scoring Opportunity per formation window.", "▸ Compute OBSO"),
         ("Timeline",          "Plot formation changes over the match.", " Show Timeline"),
         ("2D Analysis",       "Tactical analysis of formation segments in 2D space.", "▸ Run 2D Analysis"),
-        ("Viewer",            "Interactive match viewer with scrubbable slider and playback controls.", " Open Match Viewer"),
+        ("Viewer",            "Interactive match viewer with scrubbable slider and playback controls.", "▸ Open Match Viewer"),
     ]
 
     def __init__(self, callbacks: list[Callable[[], None]], parent: QWidget | None = None) -> None:
@@ -767,20 +767,21 @@ class MainWindow(QMainWindow):
         self._2d_formation = make_combo("FORMATION", ["All"])
         self._2d_min_duration = make_spin("MIN DURATION (s)", 0, 3600, 0)
 
+        # NEW: Graph Mode Control
+        self._2d_graph_mode = make_combo("GRAPH MODE", ["Combined", "Split by Team"])
+        self._2d_graph_mode.setCurrentText("Combined")
+
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color: rgba(255,255,255,0.08); margin: 4px 0;")
         layout.addWidget(sep)
 
-        # --- STAGE 4 UPDATE: Added EPV/DAS metrics to dropdowns ---
         metrics_list = [
             "Width", "Depth", "Compactness", "Duration", 
             "Center X", "Center Y", "Elongation", 
             "Centroid Displacement", "Centroid Velocity", "Confidence",
             "Pitch Control", "Home Control", "Away Control",
-            "OBSO",
-            "Cumulative EPV", "Mean EPV", "EPV / min",
-            "DAS Count", "DAS / min"
+            "OBSO"
         ]
         
         self._2d_x_axis = make_combo("X-AXIS", metrics_list)
@@ -796,7 +797,7 @@ class MainWindow(QMainWindow):
         
         layout.addStretch()
         return container
-    
+
     def _match_id(self) -> str | None:
         match_id = self.top.match_id
         if not match_id:
@@ -941,6 +942,8 @@ class MainWindow(QMainWindow):
             "y_axis": self._2d_y_axis.currentText(),
             "color": self._2d_color.currentText(),
             "shape": self._2d_shape.currentText(),
+            # Pass graph mode into configuration
+            "graph_mode": self._2d_graph_mode.currentText(),
         }
         
         try:
