@@ -1,5 +1,4 @@
 ﻿"""Dangerous Attacking Sequence helpers and EPV plotting."""
-
 from __future__ import annotations
 
 import argparse
@@ -7,23 +6,25 @@ import sys
 
 import numpy as np
 import matplotlib
-matplotlib.use("QtAgg" if "PyQt6" in sys.modules else ("MacOSX" if sys.platform == "darwin" else "TkAgg"))
+# FIX: Ensure Qt backend is used when running from UI context
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import pandas as pd
 
 from ...analytics.possession import (
-	attack_direction,
-	detect_possession_sequences,
-	epv_value,
-	forward_fill_owner,
-	get_base_directions,
-	infer_fps,
-	load_events,
-	load_epv_grid,
-	possession_sequences_from_events,
-	smooth_owner,
-	stream_ball_and_owner,
+    attack_direction,
+    detect_possession_sequences,
+    epv_value,
+    forward_fill_owner,
+    get_base_directions,
+    infer_fps,
+    load_events,
+    load_epv_grid,
+    possession_sequences_from_events,
+    smooth_owner,
+    stream_ball_and_owner,
 )
 from .momentum import bucket_epv_by_second, compute_frame_epv, load_metadata
 from ...core.config import EPV_DAS_MIN_DURATION_SECONDS, EPV_DAS_THRESHOLD, EPV_MOMENTUM_WINDOW_SECONDS, PROCESSED_DIR as PACKAGE_PROCESSED_DIR
@@ -72,12 +73,13 @@ def evaluate_das(sequences, ball_x, ball_y, periods, elapsed, epv_grid, pitch_le
             "isDAS": peak >= threshold,
         })
     
-    # FIX: Always return DataFrame with correct columns
+    # FIX: Always return DataFrame with correct columns even if empty
     if not rows:
         return pd.DataFrame(columns=["team", "period", "startSec", "endSec", 
                                      "duration", "peakEPV", "isDAS"])
         
     return pd.DataFrame(rows)
+
 
 def compute_period_offsets(metadata):
     """Convert per-period timestamps into a continuous match timeline.
@@ -123,62 +125,64 @@ def compute_period_offsets(metadata):
     
     return offsets, boundaries, cursor
 
+
 def format_mmss(seconds, _pos=None):
-	seconds = max(0, int(seconds))
-	return f"{seconds // 60:02d}:{seconds % 60:02d}"
+    seconds = max(0, int(seconds))
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
 def plot_momentum(epv_df, das_df, offsets, boundaries, total_duration,
-				   home_name, away_name, match_id, window_seconds=MOMENTUM_WINDOW_SECONDS):
-	"""Plot the signed EPV momentum signal."""
+                  home_name, away_name, match_id, window_seconds=MOMENTUM_WINDOW_SECONDS):
+    """Plot the signed EPV momentum signal."""
+    epv_df = epv_df.copy()
+    epv_df["matchSec"] = epv_df["secondIntoPeriod"] + epv_df["period"].map(offsets)
+    epv_df = epv_df.sort_values("matchSec")
 
-	epv_df = epv_df.copy()
-	epv_df["matchSec"] = epv_df["secondIntoPeriod"] + epv_df["period"].map(offsets)
-	epv_df = epv_df.sort_values("matchSec")
+    window = max(1, int(window_seconds))
+    smoothed = epv_df["meanSignedEPV"].rolling(window, center=True, min_periods=1).mean()
 
-	window = max(1, int(window_seconds))
-	smoothed = epv_df["meanSignedEPV"].rolling(window, center=True, min_periods=1).mean()
+    fig, ax = plt.subplots(figsize=(15, 6))
+    fig.patch.set_facecolor(BG_COLOR)
+    ax.set_facecolor(BG_COLOR)
 
-	fig, ax = plt.subplots(figsize=(15, 6))
-	fig.patch.set_facecolor(BG_COLOR)
-	ax.set_facecolor(BG_COLOR)
+    x = epv_df["matchSec"].to_numpy()
+    y = smoothed.to_numpy()
+    ax.fill_between(x, 0, y, where=(y >= 0), color=HOME_COLOR, alpha=0.6, zorder=2)
+    ax.fill_between(x, 0, y, where=(y < 0), color=AWAY_COLOR, alpha=0.6, zorder=2)
+    ax.axhline(0, color=GRID_COLOR, linewidth=1, zorder=1)
 
-	x = epv_df["matchSec"].to_numpy()
-	y = smoothed.to_numpy()
-	ax.fill_between(x, 0, y, where=(y >= 0), color=HOME_COLOR, alpha=0.6, zorder=2)
-	ax.fill_between(x, 0, y, where=(y < 0), color=AWAY_COLOR, alpha=0.6, zorder=2)
-	ax.axhline(0, color=GRID_COLOR, linewidth=1, zorder=1)
+    # FIX: Safely handle DAS markers
+    if das_df is not None and not das_df.empty and "isDAS" in das_df.columns:
+        das_only = das_df[das_df["isDAS"]]
+        for _, row in das_only.iterrows():
+            off = offsets.get(row["period"], 0.0)
+            t = row["startSec"] + off
+            color = HOME_COLOR if row["team"] == "home" else AWAY_COLOR
+            marker = "^" if row["team"] == "home" else "v"
+            y_pos = row["peakEPV"] if row["team"] == "home" else -row["peakEPV"]
+            ax.scatter([t], [y_pos], marker=marker, s=70, color=color,
+                       edgecolors="white", linewidths=0.8, zorder=3)
 
-	if das_df is not None and not das_df.empty:
-		das_only = das_df[das_df["isDAS"]]
-		for _, row in das_only.iterrows():
-			off = offsets.get(row["period"], 0.0)
-			t = row["startSec"] + off
-			color = HOME_COLOR if row["team"] == "home" else AWAY_COLOR
-			marker = "^" if row["team"] == "home" else "v"
-			y_pos = row["peakEPV"] if row["team"] == "home" else -row["peakEPV"]
-			ax.scatter([t], [y_pos], marker=marker, s=70, color=color,
-					   edgecolors="white", linewidths=0.8, zorder=3)
+    for boundary_time, period in boundaries[:-1]:
+        ax.axvline(boundary_time, color=GRID_COLOR, linewidth=1.2, linestyle="--", zorder=0)
+        ax.text(boundary_time, 1.02, f"End P{period}", transform=ax.get_xaxis_transform(),
+                ha="center", va="bottom", fontsize=8, color=TEXT_COLOR)
 
-	for boundary_time, period in boundaries[:-1]:
-		ax.axvline(boundary_time, color=GRID_COLOR, linewidth=1.2, linestyle="--", zorder=0)
-		ax.text(boundary_time, 1.02, f"End P{period}", transform=ax.get_xaxis_transform(),
-				ha="center", va="bottom", fontsize=8, color=TEXT_COLOR)
-
-	ax.set_xlim(0, total_duration)
-	ax.tick_params(colors=TEXT_COLOR)
-	ax.xaxis.set_major_formatter(mticker.FuncFormatter(format_mmss))
-	for spine in ax.spines.values():
-		spine.set_color(GRID_COLOR)
-	ax.set_ylabel(f"<- {away_name}      EPV momentum      {home_name} ->", color=TEXT_COLOR)
-	ax.set_xlabel("Match Time", color=TEXT_COLOR)
-	ax.set_title(
-		f"Match {match_id} â€” EPV Momentum (rolling {int(window_seconds)}s mean)\n"
-		f"â–²/â–¼ markers = Dangerous Attacking Sequences (peak EPV â‰¥ {DAS_EPV_THRESHOLD})",
-		color=TEXT_COLOR, fontsize=12
-	)
-	fig.tight_layout()
-	return fig
+    ax.set_xlim(0, total_duration)
+    ax.tick_params(colors=TEXT_COLOR)
+    ax.xaxis.set_major_formatter(mticker.FuncFormatter(format_mmss))
+    for spine in ax.spines.values():
+        spine.set_color(GRID_COLOR)
+    
+    ax.set_ylabel(f"<- {away_name}      EPV momentum      {home_name} ->", color=TEXT_COLOR)
+    ax.set_xlabel("Match Time", color=TEXT_COLOR)
+    ax.set_title(
+        f"Match {match_id} — EPV Momentum (rolling {int(window_seconds)}s mean)\n"
+        f"▲/▼ markers = Dangerous Attacking Sequences (peak EPV ≥ {DAS_EPV_THRESHOLD})",
+        color=TEXT_COLOR, fontsize=12
+    )
+    fig.tight_layout()
+    return fig
 
 
 def plot_das_timeline(das_df, offsets, boundaries, total_duration, home_name, away_name, match_id):
@@ -226,88 +230,82 @@ def plot_das_timeline(das_df, offsets, boundaries, total_duration, home_name, aw
 
 
 def run_analysis(match_id, processed_dir, epv_grid_path):
-	"""Run the full EPV + DAS analysis pipeline for one match."""
+    """Run the full EPV + DAS analysis pipeline for one match."""
+    matplotlib.use("Agg", force=True)
 
-	metadata, tracking_path, match_dir = load_metadata(match_id, processed_dir)
-	pitch_length = metadata["pitch"]["length"]
-	pitch_width = metadata["pitch"]["width"]
-	home_name = (metadata.get("homeTeam", {}).get("shortName")
-				 or metadata.get("homeTeam", {}).get("name", "Home"))
-	away_name = (metadata.get("awayTeam", {}).get("shortName")
-				 or metadata.get("awayTeam", {}).get("name", "Away"))
+    metadata, tracking_path, match_dir = load_metadata(match_id, processed_dir)
+    pitch_length = metadata["pitch"]["length"]
+    pitch_width = metadata["pitch"]["width"]
+    home_name = (metadata.get("homeTeam", {}).get("shortName")
+                 or metadata.get("homeTeam", {}).get("name", "Home"))
+    away_name = (metadata.get("awayTeam", {}).get("shortName")
+                 or metadata.get("awayTeam", {}).get("name", "Away"))
 
-	logger.info("Loading EPV grid...")
-	epv_grid = load_epv_grid(epv_grid_path)
-	home_dir_p1, away_dir_p1 = get_base_directions(metadata)
+    logger.info("Loading EPV grid...")
+    epv_grid = load_epv_grid(epv_grid_path)
+    home_dir_p1, away_dir_p1 = get_base_directions(metadata)
 
-	logger.info("Streaming ball position + possession...")
-	periods, elapsed, ball_x, ball_y, owner = stream_ball_and_owner(
-		tracking_path, pitch_length, pitch_width)
-	fps = infer_fps(elapsed, periods)
-	smoothed = smooth_owner(owner, periods, fps)
-	sequences = detect_possession_sequences(smoothed, periods, elapsed, fps)
+    logger.info("Streaming ball position + possession...")
+    periods, elapsed, ball_x, ball_y, owner = stream_ball_and_owner(
+        tracking_path, pitch_length, pitch_width)
+    fps = infer_fps(elapsed, periods)
+    smoothed = smooth_owner(owner, periods, fps)
+    sequences = detect_possession_sequences(smoothed, periods, elapsed, fps)
 
-	events = load_events(match_dir)
-	if events:
-		logger.info("Using %s real events for possession sequences (ground truth).", len(events))
-		home_team_id = metadata.get("homeTeam", {}).get("id")
-		das_sequences_input = possession_sequences_from_events(events, home_team_id)
-	else:
-		logger.info("No events.json for this match -- falling back to proximity-proxy possession sequences (forward-filled).")
-		das_owner = forward_fill_owner(smoothed, periods, elapsed)
-		das_sequences_input = detect_possession_sequences(das_owner, periods, elapsed, fps)
+    events = load_events(match_dir)
+    if events:
+        logger.info("Using %s real events for possession sequences (ground truth).", len(events))
+        home_team_id = metadata.get("homeTeam", {}).get("id")
+        das_sequences_input = possession_sequences_from_events(events, home_team_id)
+    else:
+        logger.info("No events.json for this match -- falling back to proximity-proxy possession sequences.")
+        das_owner = forward_fill_owner(smoothed, periods, elapsed)
+        das_sequences_input = detect_possession_sequences(das_owner, periods, elapsed, fps)
 
-	logger.info("Computing per-frame EPV...")
-	signed_epv = compute_frame_epv(periods, elapsed, ball_x, ball_y, smoothed,
-									epv_grid, pitch_length, pitch_width, home_dir_p1, away_dir_p1)
-	epv_df = bucket_epv_by_second(periods, elapsed, signed_epv)
+    logger.info("Computing per-frame EPV...")
+    signed_epv = compute_frame_epv(periods, elapsed, ball_x, ball_y, smoothed,
+                                   epv_grid, pitch_length, pitch_width, home_dir_p1, away_dir_p1)
+    epv_df = bucket_epv_by_second(periods, elapsed, signed_epv)
 
-	logger.info("Evaluating Dangerous Attacking Sequences...")
-	das_df = evaluate_das(das_sequences_input, ball_x, ball_y, periods, elapsed, epv_grid,
-						   pitch_length, pitch_width, home_dir_p1, away_dir_p1)
+    logger.info("Evaluating Dangerous Attacking Sequences...")
+    das_df = evaluate_das(das_sequences_input, ball_x, ball_y, periods, elapsed, epv_grid,
+                          pitch_length, pitch_width, home_dir_p1, away_dir_p1)
 
-	epv_out = match_dir / "epv_timeseries.csv"
-	das_out = match_dir / "das_sequences.csv"
-	epv_df.to_csv(epv_out, index=False)
-	das_df.to_csv(das_out, index=False)
-	logger.info("Wrote %s (%s rows)", epv_out, len(epv_df))
-	logger.info("Wrote %s (%s rows)", das_out, len(das_df))
+    epv_out = match_dir / "epv_timeseries.csv"
+    das_out = match_dir / "das_sequences.csv"
+    epv_df.to_csv(epv_out, index=False)
+    das_df.to_csv(das_out, index=False)
+    logger.info("Wrote %s (%s rows)", epv_out, len(epv_df))
+    logger.info("Wrote %s (%s rows)", das_out, len(das_df))
 
-	n_das_home = int(((das_df["team"] == "home") & das_df["isDAS"]).sum()) if len(das_df) else 0
-	n_das_away = int(((das_df["team"] == "away") & das_df["isDAS"]).sum()) if len(das_df) else 0
+    n_das_home = int(((das_df["team"] == "home") & das_df["isDAS"]).sum()) if len(das_df) and "isDAS" in das_df.columns else 0
+    n_das_away = int(((das_df["team"] == "away") & das_df["isDAS"]).sum()) if len(das_df) and "isDAS" in das_df.columns else 0
 
-	logger.info("=== Summary ===")
-	logger.info(
-		"%s: %s Dangerous Attacking Sequences (out of %s possession sequences >= %ss)",
-		home_name,
-		n_das_home,
-		int((das_df['team'] == 'home').sum()) if len(das_df) else 0,
-		DAS_MIN_DURATION_SECONDS,
-	)
-	logger.info(
-		"%s: %s Dangerous Attacking Sequences (out of %s possession sequences >= %ss)",
-		away_name,
-		n_das_away,
-		int((das_df['team'] == 'away').sum()) if len(das_df) else 0,
-		DAS_MIN_DURATION_SECONDS,
-	)
-	logger.info("Mean signed EPV (whole match, +ve = %s dominant): %.4f", home_name, epv_df['meanSignedEPV'].mean())
+    logger.info("=== Summary ===")
+    logger.info(
+        "%s: %s Dangerous Attacking Sequences (out of %s possession sequences >= %ss)",
+        home_name, n_das_home, int((das_df['team'] == 'home').sum()) if len(das_df) else 0, DAS_MIN_DURATION_SECONDS,
+    )
+    logger.info(
+        "%s: %s Dangerous Attacking Sequences (out of %s possession sequences >= %ss)",
+        away_name, n_das_away, int((das_df['team'] == 'away').sum()) if len(das_df) else 0, DAS_MIN_DURATION_SECONDS,
+    )
+    logger.info("Mean signed EPV (whole match, +ve = %s dominant): %.4f", home_name, epv_df['meanSignedEPV'].mean())
 
-	offsets, boundaries, total_duration = compute_period_offsets(metadata)
+    offsets, boundaries, total_duration = compute_period_offsets(metadata)
 
-	fig1 = plot_momentum(epv_df, das_df, offsets, boundaries, total_duration, home_name, away_name, match_id)
-	fig2 = plot_das_timeline(das_df, offsets, boundaries, total_duration, home_name, away_name, match_id)
-	return fig1, fig2
+    fig1 = plot_momentum(epv_df, das_df, offsets, boundaries, total_duration, home_name, away_name, match_id)
+    fig2 = plot_das_timeline(das_df, offsets, boundaries, total_duration, home_name, away_name, match_id)
+    return fig1, fig2
 
 
 def main():
-	"""CLI entry point for the EPV/DAS analysis package."""
+    """CLI entry point for the EPV/DAS analysis package."""
+    parser = argparse.ArgumentParser(description="EPV momentum + Dangerous Attacking Sequences analysis.")
+    parser.add_argument("match_id")
+    parser.add_argument("--processed-dir", default=PROCESSED_DIR_DEFAULT)
+    parser.add_argument("--epv-grid", default=EPV_GRID_DEFAULT)
+    args = parser.parse_args()
 
-	parser = argparse.ArgumentParser(description="EPV momentum + Dangerous Attacking Sequences analysis.")
-	parser.add_argument("match_id")
-	parser.add_argument("--processed-dir", default=PROCESSED_DIR_DEFAULT)
-	parser.add_argument("--epv-grid", default=EPV_GRID_DEFAULT)
-	args = parser.parse_args()
-
-	run_analysis(args.match_id, args.processed_dir, args.epv_grid)
-	plt.show()
+    run_analysis(args.match_id, args.processed_dir, args.epv_grid)
+    plt.show()

@@ -22,7 +22,7 @@ import json
 import argparse
 from collections import Counter
 import matplotlib
-matplotlib.use("QtAgg" if "PyQt6" in sys.modules else ("MacOSX" if sys.platform == "darwin" else "TkAgg"))
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import pandas as pd

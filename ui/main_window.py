@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+
 from ..io.paths import EPV_GRID_PATH, PROCESSED_DIR, RAW_TRACKING_DIR
 from ..pipeline import runner
 from . import timeline, viewer
@@ -53,8 +54,6 @@ class Worker(QObject):
         self.log.emit(text)
 
     def run(self) -> None:
-        import matplotlib.pyplot as plt
-        plt.switch_backend("Agg")
         writer = _SignalWriter(self._on_output)
         try:
             with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
@@ -110,7 +109,9 @@ class ComparisonView(QWidget):
             graph_layout = QVBoxLayout(graph_container)
             graph_layout.setContentsMargins(0, 0, 0, 0)
             
-            canvas = figure.canvas if hasattr(figure, 'canvas') else FigureCanvasQTAgg(figure)
+            canvas = figure.canvas
+            if not isinstance(canvas, FigureCanvasQTAgg):
+                canvas = FigureCanvasQTAgg(figure)
             canvas.setParent(graph_container)
             canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             
@@ -285,7 +286,9 @@ class FigureTab(QWidget):
         plot_layout = QVBoxLayout(plot_container)
         plot_layout.setContentsMargins(0, 0, 0, 0)
         
-        canvas = figure.canvas if hasattr(figure, 'canvas') else FigureCanvasQTAgg(figure)
+        canvas = figure.canvas
+        if not isinstance(canvas, FigureCanvasQTAgg):
+            canvas = FigureCanvasQTAgg(figure)
         canvas.setParent(plot_container)
         canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
@@ -1059,17 +1062,13 @@ class MainWindow(QMainWindow):
         match_id = self._match_id()
         if match_id is None: return
         from ..pipeline.runner import pitch_control_figure
-        import matplotlib.pyplot as plt
-        plt.switch_backend("Agg")
         fig, df = pitch_control_figure(match_id, processed_dir=self.top.processed_dir)
-        self._show_result("Pitch Control", fig)
+        self._show_result("Pitch Control", fig) 
 
     def run_obso(self) -> None:
         match_id = self._match_id()
         if match_id is None: return
         from ..pipeline.runner import obso_figure
-        import matplotlib.pyplot as plt
-        plt.switch_backend("Agg")
         fig, df = obso_figure(match_id, processed_dir=self.top.processed_dir, epv_grid_path=self.top.epv_grid)
         self._show_result("OBSO", fig)
 
@@ -1091,19 +1090,40 @@ class MainWindow(QMainWindow):
     def run_timeline(self) -> None:
         match_id = self._match_id()
         if match_id is None: return
-        import matplotlib.pyplot as plt
         method = "voted" if self._timeline_method.currentIndex() == 0 else "all_formations"
         granularity = "variant" if self._timeline_granularity.currentIndex() == 0 else "family"
-        plt.switch_backend("QtAgg")
-        timeline.plot_formation_timeline(match_id, self.top.processed_dir, method=method, granularity=granularity)
-        plt.show(block=False)
+        fig = timeline.plot_formation_timeline(match_id, self.top.processed_dir, method=method, granularity=granularity)
+
+        # Embed in the app as usual
+        self._show_result("Timeline", fig)
+
+        # Also pop it open as a separate native matplotlib window
+        popup = QDialog(self)
+        popup.setWindowTitle(f"Timeline — Match {match_id}")
+        popup.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        popup.resize(1100, 500)
+        layout = QVBoxLayout(popup)
+        layout.setContentsMargins(4, 4, 4, 4)
+
+        popup_canvas = FigureCanvasQTAgg(fig)
+        popup_toolbar = NavigationToolbar2QT(popup_canvas, popup)
+        layout.addWidget(popup_toolbar)
+        layout.addWidget(popup_canvas)
+        popup_canvas.draw_idle()
+
+        popup.setModal(False)
+        popup.show()
+        self._timeline_popup = popup # keep a reference so it isn't garbage-collected
 
     def run_2d_analysis(self) -> None:
         match_id = self._match_id()
         if match_id is None: return
         
-        import matplotlib.pyplot as plt
-        plt.switch_backend("QtAgg")
         from .two_d_analysis import plot_2d_analysis
         
         display_mode = self._2d_display_mode.currentText()
